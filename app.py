@@ -11,25 +11,41 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
-# =========================================================
-# PAGE SETTINGS
-# =========================================================
+# =========================
+# PAGE
+# =========================
 st.set_page_config(page_title="BauApp - R. Baumgartner", layout="wide")
 
+# Sidebar logo (robust path)
 logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
 if os.path.exists(logo_path):
     st.sidebar.image(logo_path, use_container_width=True)
-else:
-    st.sidebar.warning("logo.png nicht gefunden (muss im gleichen Ordner wie app.py liegen).")
 
+# =========================
+# CONSTANTS
+# =========================
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 PROJECTS_CSV_NAME = "Projects.csv"
-REPORTS_SUBFOLDER_NAME = "Rapporte"  # Unterordner in REPORTS_FOLDER_ID
+REPORTS_SUBFOLDER_NAME = "Rapporte"
 
-# =========================================================
+PROJECTS_COLS = ["Projekt", "Status"]  # Status: aktiv | archiviert
+
+RAPPORT_COLUMNS = [
+    "Datum",
+    "Projekt",
+    "Mitarbeiter",
+    "Start",
+    "Ende",
+    "Pause_h",
+    "Stunden",
+    "Material",
+    "Bemerkung",
+]
+
+# =========================
 # SECRETS (STRICT)
-# =========================================================
+# =========================
 def require_secret(key: str) -> str:
     if key not in st.secrets or str(st.secrets[key]).strip() == "":
         st.error(f"Fehlendes Geheimnis: {key}")
@@ -51,9 +67,9 @@ UPLOADS_FOLDER_ID = require_secret("UPLOADS_FOLDER_ID")
 REPORTS_FOLDER_ID = require_secret("REPORTS_FOLDER_ID")
 ADMIN_PASSWORD    = require_secret("ADMIN_PASSWORD")
 
-# =========================================================
+# =========================
 # AUTH (OAuth Refresh Token)
-# =========================================================
+# =========================
 def authenticate_drive():
     oauth = require_section("google_auth")
     for k in ["client_id", "client_secret", "refresh_token"]:
@@ -78,15 +94,16 @@ def authenticate_drive():
 
 drive = authenticate_drive()
 
-# =========================================================
+# =========================
 # DRIVE HELPERS
-# =========================================================
+# =========================
+def drive_list(query: str, fields: str, page_size: int = 200):
+    return drive.files().list(q=query, fields=fields, pageSize=page_size).execute().get("files", [])
+
 def find_file_in_folder_by_name(folder_id: str, name: str):
-    """Return first matching fileId by name within folder (non-trashed)."""
     try:
         q = f"name = '{name}' and '{folder_id}' in parents and trashed=false"
-        res = drive.files().list(q=q, fields="files(id,name)", pageSize=10).execute()
-        files = res.get("files", [])
+        files = drive_list(q, "files(id,name,modifiedTime)", page_size=20)
         return files[0]["id"] if files else None
     except Exception as e:
         st.error(f"Drive-Suche Fehler: {e}")
@@ -95,12 +112,7 @@ def find_file_in_folder_by_name(folder_id: str, name: str):
 def list_files(folder_id: str):
     try:
         q = f"'{folder_id}' in parents and trashed=false"
-        res = drive.files().list(
-            q=q,
-            fields="files(id,name,mimeType,createdTime)",
-            pageSize=200
-        ).execute()
-        return res.get("files", [])
+        return drive_list(q, "files(id,name,mimeType,createdTime)", page_size=200)
     except Exception as e:
         st.error(f"Drive-Liste Fehler: {e}")
         return []
@@ -142,7 +154,7 @@ def upload_streamlit_file(uploaded_file, folder_id: str, filename: str):
         meta = {"name": filename, "parents": [folder_id]}
         media = MediaIoBaseUpload(
             io.BytesIO(uploaded_file.getvalue()),
-            mimetype=uploaded_file.type,
+            mimetype=uploaded_file.type or "application/octet-stream",
             resumable=False
         )
         drive.files().create(body=meta, media_body=media, fields="id").execute()
@@ -160,14 +172,12 @@ def delete_file(file_id: str):
         return False
 
 def ensure_subfolder(parent_id: str, folder_name: str) -> str:
-    """Return folder_id of (parent/folder_name). Create if missing."""
     try:
         q = (
             f"mimeType='application/vnd.google-apps.folder' and "
             f"name='{folder_name}' and '{parent_id}' in parents and trashed=false"
         )
-        res = drive.files().list(q=q, fields="files(id,name)", pageSize=5).execute()
-        files = res.get("files", [])
+        files = drive_list(q, "files(id,name)", page_size=5)
         if files:
             return files[0]["id"]
 
@@ -182,17 +192,12 @@ def ensure_subfolder(parent_id: str, folder_name: str) -> str:
         st.error(f"Unterordner Fehler: {e}")
         st.stop()
 
-# Alle Rapport-Dateien landen hier:
 REPORTS_HOME_FOLDER_ID = ensure_subfolder(REPORTS_FOLDER_ID, REPORTS_SUBFOLDER_NAME)
 
-# =========================================================
-# PROJECTS (persist + archive)
-# =========================================================
-PROJECTS_COLS = ["Projekt", "Status"]  # Status: aktiv | archiviert
-DEFAULT_PROJECTS = ["Neubau Müller", "Sanierung West", "Dachstock Meier"]
-
+# =========================
+# PROJECTS (Drive + Archive)
+# =========================
 def save_projects_df(df: pd.DataFrame):
-    """Persist Projects.csv to REPORTS_FOLDER_ID (create or update)."""
     fid = find_file_in_folder_by_name(REPORTS_FOLDER_ID, PROJECTS_CSV_NAME)
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     if fid:
@@ -201,17 +206,16 @@ def save_projects_df(df: pd.DataFrame):
         upload_bytes_to_folder(REPORTS_FOLDER_ID, PROJECTS_CSV_NAME, csv_bytes, "text/csv")
 
 def load_projects_df() -> pd.DataFrame:
-    """Load projects table. If missing: create defaults and persist immediately."""
     fid = find_file_in_folder_by_name(REPORTS_FOLDER_ID, PROJECTS_CSV_NAME)
 
     if not fid:
-        df = pd.DataFrame({"Projekt": DEFAULT_PROJECTS, "Status": ["aktiv"] * len(DEFAULT_PROJECTS)})
-        save_projects_df(df)
+        defaults = ["Neubau Müller", "Sanierung West", "Dachstock Meier"]
+        df = pd.DataFrame({"Projekt": defaults, "Status": ["aktiv"] * len(defaults)})
+        save_projects_df(df)  # create immediately
         return df
 
     content = download_bytes(fid)
     if not content:
-        # File exists but can't be read now -> return empty (no defaults, to avoid "reappearing")
         return pd.DataFrame(columns=PROJECTS_COLS)
 
     try:
@@ -226,7 +230,6 @@ def load_projects_df() -> pd.DataFrame:
         df["Status"] = "aktiv"
         save_projects_df(df)
 
-    # normalize
     df["Projekt"] = df["Projekt"].astype(str).str.strip()
     df["Status"] = df["Status"].astype(str).str.strip().str.lower()
 
@@ -242,45 +245,37 @@ def load_projects(include_archived: bool = False) -> list[str]:
     return df[df["Status"] != "archiviert"]["Projekt"].tolist()
 
 def add_or_restore_project(project_name: str):
-    p = str(project_name).strip()
+    p = (project_name or "").strip()
     if not p:
-        return
+        return False
+
     df = load_projects_df()
     mask = df["Projekt"].astype(str).str.strip() == p
     if mask.any():
         df.loc[mask, "Status"] = "aktiv"
     else:
         df = pd.concat([df, pd.DataFrame([{"Projekt": p, "Status": "aktiv"}])], ignore_index=True)
+
     save_projects_df(df)
+    return True
 
 def set_project_status(project_name: str, status: str):
-    p = str(project_name).strip()
+    p = (project_name or "").strip()
     if not p:
-        return
-    status = str(status).strip().lower()
-    if status not in ["aktiv", "archiviert"]:
-        status = "aktiv"
+        return False
+
     df = load_projects_df()
     mask = df["Projekt"].astype(str).str.strip() == p
-    if mask.any():
-        df.loc[mask, "Status"] = status
-        save_projects_df(df)
+    if not mask.any():
+        return False
 
-# =========================================================
+    df.loc[mask, "Status"] = status
+    save_projects_df(df)
+    return True
+
+# =========================
 # RAPPORTS (clean schema)
-# =========================================================
-RAPPORT_COLUMNS = [
-    "Datum",
-    "Projekt",
-    "Mitarbeiter",
-    "Start",
-    "Ende",
-    "Pause_h",
-    "Stunden",
-    "Material",
-    "Bemerkung",
-]
-
+# =========================
 def report_csv_name(project: str) -> str:
     return f"{project}_Reports.csv"
 
@@ -291,20 +286,18 @@ def normalize_reports_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=RAPPORT_COLUMNS)
 
-    # bekannte unnötige Spalten entfernen
+    # remove known legacy cols
     for c in list(df.columns):
         lc = str(c).strip().lower()
         if lc in ["timestamp", "erfasst_am", "erfasst am", "pause", "pause2", "pause_2"]:
             df = df.drop(columns=[c], errors="ignore")
 
-    # alte Spaltennamen
     rename_map = {}
     if "Pause (h)" in df.columns and "Pause_h" not in df.columns:
         rename_map["Pause (h)"] = "Pause_h"
     if rename_map:
         df = df.rename(columns=rename_map)
 
-    # fehlende Spalten ergänzen
     for col in RAPPORT_COLUMNS:
         if col not in df.columns:
             df[col] = ""
@@ -329,8 +322,8 @@ def load_reports(project: str) -> pd.DataFrame:
 
     df_clean = normalize_reports_df(df)
 
-    # Auto-Migration zurückschreiben (Schema/Spaltenreihenfolge)
-    if set(df_clean.columns) != set(df.columns) or list(df_clean.columns) != list(df.columns):
+    # migration write-back
+    if list(df_clean.columns) != list(df.columns):
         update_file_bytes(fid, df_clean.to_csv(index=False).encode("utf-8"), "text/csv")
 
     return df_clean
@@ -351,27 +344,27 @@ def append_report(project: str, row: dict):
             "text/csv"
         )
 
-# =========================================================
+# =========================
 # UI
-# =========================================================
+# =========================
 st.sidebar.header("BauApp")
 role = st.sidebar.radio("Bereich:", ["Mitarbeiter", "Admin"])
 
-# -------------------------
-# Mitarbeiter
-# -------------------------
+projects_active = load_projects(include_archived=False)
+
+# ===== Mitarbeiter =====
 if role == "Mitarbeiter":
     st.title("👷 Mitarbeiter")
 
-    projects = load_projects(include_archived=False)
-    if not projects:
-        st.warning("Keine aktiven Projekte vorhanden. (Admin: Projekt anlegen oder aus Archiv wiederherstellen)")
+    if not projects_active:
+        st.warning("Keine aktiven Projekte vorhanden. (Admin: Projekte anlegen oder aus Archiv wiederherstellen)")
         st.stop()
 
-    project = st.selectbox("Projekt:", projects)
-    tab_rapport, tab_photos, tab_plans = st.tabs(["📝 Rapport", "📷 Fotos", "📂 Pläne"])
+    project = st.selectbox("Projekt:", projects_active)
 
-    with tab_rapport:
+    tab1, tab2, tab3 = st.tabs(["📝 Rapport", "📷 Fotos", "📂 Pläne"])
+
+    with tab1:
         with st.form("rapport_form"):
             d = st.date_input("Datum", datetime.now())
             name = st.text_input("Name")
@@ -384,32 +377,35 @@ if role == "Mitarbeiter":
             material = st.text_area("Material")
             bemerkung = st.text_area("Bemerkung")
 
-            if st.form_submit_button("Senden"):
-                dt_start = datetime.combine(d, t_start)
-                dt_end = datetime.combine(d, t_end)
-                if dt_end < dt_start:
-                    dt_end += timedelta(days=1)
+            submitted = st.form_submit_button("Senden")
 
-                hours = ((dt_end - dt_start).total_seconds() / 3600) - float(pause_h)
+        if submitted:
+            dt_start = datetime.combine(d, t_start)
+            dt_end = datetime.combine(d, t_end)
+            if dt_end < dt_start:
+                dt_end += timedelta(days=1)
 
-                append_report(project, {
-                    "Datum": d.strftime("%Y-%m-%d"),
-                    "Projekt": project,
-                    "Mitarbeiter": name,
-                    "Start": t_start.strftime("%H:%M"),
-                    "Ende": t_end.strftime("%H:%M"),
-                    "Pause_h": float(pause_h),
-                    "Stunden": round(hours, 2),
-                    "Material": material,
-                    "Bemerkung": bemerkung,
-                })
+            hours = ((dt_end - dt_start).total_seconds() / 3600) - float(pause_h)
 
-                st.success("Rapport gespeichert.")
-                sys_time.sleep(0.2)
-                st.rerun()
+            append_report(project, {
+                "Datum": d.strftime("%Y-%m-%d"),
+                "Projekt": project,
+                "Mitarbeiter": name,
+                "Start": t_start.strftime("%H:%M"),
+                "Ende": t_end.strftime("%H:%M"),
+                "Pause_h": float(pause_h),
+                "Stunden": round(hours, 2),
+                "Material": material,
+                "Bemerkung": bemerkung,
+            })
 
-    with tab_photos:
-        # Stabiler Upload via FORM + mobile Formate
+            st.success("Rapport gespeichert.")
+            sys_time.sleep(0.2)
+            st.rerun()
+
+    with tab2:
+        st.caption("Smartphone: iPhone oft HEIC, Android oft WEBP.")
+
         with st.form("photo_upload_form", clear_on_submit=True):
             up = st.file_uploader(
                 "Foto hochladen",
@@ -439,7 +435,7 @@ if role == "Mitarbeiter":
         if not shown:
             st.info("Keine Fotos für dieses Projekt vorhanden.")
 
-    with tab_plans:
+    with tab3:
         files = list_files(UPLOADS_FOLDER_ID)
         found = False
         for f in files:
@@ -454,9 +450,7 @@ if role == "Mitarbeiter":
         if not found:
             st.info("Keine Pläne/Dokumente vorhanden.")
 
-# -------------------------
-# Admin
-# -------------------------
+# ===== Admin =====
 else:
     pw = st.sidebar.text_input("Passwort", type="password")
     if pw != ADMIN_PASSWORD:
@@ -473,14 +467,18 @@ else:
 
     new_proj = st.text_input("Projekt anlegen oder archiviertes reaktivieren")
     if st.button("➕ Projekt speichern"):
-        add_or_restore_project(new_proj)
-        st.success("Projekt gespeichert.")
-        st.rerun()
+        ok = add_or_restore_project(new_proj)
+        if ok:
+            st.success("Projekt gespeichert.")
+            st.rerun()
+        else:
+            st.warning("Bitte Projektname eingeben.")
 
     if active_projects:
-        proj = st.selectbox("Aktives Projekt:", active_projects, key="admin_proj")
-        confirm = st.checkbox("Projekt archivieren (bleibt im Drive)")
-        if st.button("🗃️ Projekt archivieren") and confirm:
+        proj = st.selectbox("Aktives Projekt", active_projects)
+        c1, c2 = st.columns([0.7, 0.3])
+        confirm = c1.checkbox("Archivieren (Drive-Daten bleiben)")
+        if c2.button("🗃️ Archivieren") and confirm:
             set_project_status(proj, "archiviert")
             st.success("Projekt archiviert.")
             st.rerun()
@@ -490,21 +488,19 @@ else:
 
     st.divider()
     st.subheader("Archivierte Projekte")
-
     if archived_projects:
-        sel_arch = st.selectbox("Archiv", archived_projects, key="arch_sel")
+        arch = st.selectbox("Archiv", archived_projects)
         if st.button("♻️ Wiederherstellen"):
-            set_project_status(sel_arch, "aktiv")
+            set_project_status(arch, "aktiv")
             st.success("Projekt wiederhergestellt.")
             st.rerun()
     else:
         st.info("Keine archivierten Projekte vorhanden.")
 
-    # Tabs
     t_reports, t_plans, t_photos = st.tabs(["📄 Rapporte", "📂 Pläne", "📷 Fotos"])
 
     with t_reports:
-        if proj is None:
+        if not proj:
             st.info("Kein aktives Projekt gewählt.")
         else:
             df = load_reports(proj)
@@ -520,11 +516,10 @@ else:
                 )
 
     with t_plans:
-        if proj is None:
+        if not proj:
             st.info("Kein aktives Projekt gewählt.")
         else:
-            st.caption("Stabiler Upload über Formular (verhindert UI-Fehler beim Button-Klick).")
-
+            st.caption("Upload über Formular (stabil).")
             with st.form("plan_upload_form", clear_on_submit=True):
                 up_p = st.file_uploader("Plan/Dokument auswählen", key="plan_upload_file")
                 submit = st.form_submit_button("⬆️ Dokument hochladen")
@@ -539,11 +534,6 @@ else:
                         st.success("Dokument hochgeladen.")
                         sys_time.sleep(0.2)
                         st.rerun()
-                    else:
-                        st.error("Upload fehlgeschlagen (siehe Fehlermeldung oben).")
-
-            if st.button("🔄 Aktualisieren"):
-                pass
 
             files = list_files(UPLOADS_FOLDER_ID)
             any_ = False
@@ -560,7 +550,7 @@ else:
                 st.info("Keine Pläne/Dokumente vorhanden.")
 
     with t_photos:
-        if proj is None:
+        if not proj:
             st.info("Kein aktives Projekt gewählt.")
         else:
             files = list_files(PHOTOS_FOLDER_ID)
@@ -574,5 +564,6 @@ else:
                     if st.button("🗑 Foto löschen", key=f"del_photo_{f['id']}"):
                         delete_file(f["id"])
                         st.rerun()
+
             if not any_:
                 st.info("Keine Fotos vorhanden.")
