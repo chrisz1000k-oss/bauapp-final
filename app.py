@@ -494,79 +494,113 @@ if role == "Mitarbeiter":
     
     with tab2:
         st.caption(
-            "📱 Smartphone: Streamlit 'camera_input' wird auf Mobile/Cloud teils nicht angezeigt. "
-            "Daher nutzen wir nur den Datei-Uploader (öffnet Kamera oder Galerie je nach Gerät). "
-            "HEIC/WEBP werden wenn möglich zu JPEG konvertiert – sonst laden wir das Original hoch."
+            "📱 Android-Hinweis: Bei manchen Geräten verliert Streamlit nach dem Tippen auf einen Button "
+            "die Referenz auf die ausgewählte Datei. Darum speichern wir das Foto sofort in der Session "
+            "und laden es dann hoch. (Kamera/Galerie Auswahl kommt über 'Datei wählen'.)"
         )
 
-        # Single uploader (mobile will offer Camera / Gallery)
-        up = st.file_uploader(
-            "📸 Foto aufnehmen oder auswählen",
-            type=["jpg", "jpeg", "png", "heic", "webp"],
-            accept_multiple_files=False,
-            key="photo_upload_file",
-        )
+        # --- Session keys
+        PENDING_KEY = "pending_photo"
+        UPLOADER_KEY = "photo_upload_file"
 
         def reset_photo_inputs():
-            # Widget leeren (Uploader)
-            if "photo_upload_file" in st.session_state:
-                del st.session_state["photo_upload_file"]
+            # Clear pending + uploader
+            for k in (PENDING_KEY, UPLOADER_KEY):
+                if k in st.session_state:
+                    del st.session_state[k]
 
-        def prepare_photo_payload(upl):
-            """Return (bytes, mimetype, out_filename).
-            Tries JPEG normalize; if that fails (e.g., missing HEIC decoder), uploads original bytes.
-            """
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            in_name = getattr(upl, "name", None) or f"upload_{ts}.bin"
-            in_base, in_ext = os.path.splitext(in_name)
-            in_ext = (in_ext or ".bin").lower()
-            in_mime = getattr(upl, "type", None) or "application/octet-stream"
-            raw = upl.getvalue()
+        def prepare_photo_payload_from_bytes(raw: bytes, in_name: str, in_mime: str):
+            """Return (bytes, mimetype, out_filename). Tries JPEG normalize using a temp-like wrapper."""
+            class _Wrap:
+                def __init__(self, b, name, mime):
+                    self._b = b
+                    self.name = name
+                    self.type = mime
+                def getvalue(self):
+                    return self._b
 
-            # Try normalize -> JPEG (best for preview + compatibility)
+            upl = _Wrap(raw, in_name, in_mime)
             try:
                 jpeg_bytes, suggested = normalize_image_to_jpeg(upl, max_side=2000, quality=82)
                 out_base = os.path.splitext(suggested)[0]
-                return jpeg_bytes, "image/jpeg", f"{out_base}.jpg"
+                return jpeg_bytes, "image/jpeg", f"{out_base}.jpg", "JPEG (komprimiert)"
             except Exception:
-                # Fallback: upload original (still better than blocking upload)
-                return raw, in_mime, f"{in_base}{in_ext}"
+                base, ext = os.path.splitext(in_name or "upload.bin")
+                ext = (ext or ".bin").lower()
+                return raw, (in_mime or "application/octet-stream"), f"{base}{ext}", "Original (ohne Konvertierung)"
 
-        # Debug info (helps diagnose mobile issues)
-        with st.expander("🔎 Debug (falls Upload nicht klappt)", expanded=False):
-            if up is None:
-                st.write("Keine Datei gewählt.")
-            else:
-                try:
-                    st.write("MIME:", getattr(up, "type", None))
-                    st.write("Name:", getattr(up, "name", None))
-                    st.write("Bytes:", len(up.getvalue()))
-                except Exception as e:
-                    st.write("Debug Fehler:", e)
-
-        # Preview (best effort): show converted JPEG preview if possible
-        if up is not None:
+        def on_photo_selected():
+            upl = st.session_state.get(UPLOADER_KEY)
+            if upl is None:
+                return
             try:
-                preview_bytes, _, _ = prepare_photo_payload(up)
-                st.image(preview_bytes, width=320)
-                st.caption("Vorschau (ggf. nach Konvertierung/Kompression).")
-            except Exception:
-                pass
+                raw = upl.getvalue()
+                st.session_state[PENDING_KEY] = {
+                    "raw": raw,
+                    "name": getattr(upl, "name", None) or "upload.bin",
+                    "mime": getattr(upl, "type", None) or "application/octet-stream",
+                    "size": len(raw),
+                    "ts": datetime.now().strftime("%Y%m%d_%H%M%S"),
+                }
+            except Exception as e:
+                st.session_state[PENDING_KEY] = {"error": str(e)}
 
+        # --- Uploader with on_change -> cache bytes in session (Android-stabil)
+        st.file_uploader(
+            "📸 Foto aufnehmen oder auswählen (Android: tippe auf 'Datei wählen')",
+            type=["jpg", "jpeg", "png", "heic", "webp"],
+            accept_multiple_files=False,
+            key=UPLOADER_KEY,
+            on_change=on_photo_selected,
+        )
+
+        pending = st.session_state.get(PENDING_KEY)
+
+        with st.expander("🔎 Debug (Android)", expanded=False):
+            st.write("pending vorhanden:", pending is not None)
+            if isinstance(pending, dict):
+                for k in ["name", "mime", "size", "ts", "error"]:
+                    if k in pending:
+                        st.write(f"{k}:", pending.get(k))
+
+        # Preview + info
+        if isinstance(pending, dict) and "raw" in pending:
+            raw = pending["raw"]
+            in_name = pending.get("name", "upload.bin")
+            in_mime = pending.get("mime", "application/octet-stream")
+            try:
+                preview_bytes, _pmime, _pname, mode = prepare_photo_payload_from_bytes(raw, in_name, in_mime)
+                st.image(preview_bytes, width=320)
+                st.caption(f"Vorschau: {mode}")
+            except Exception as e:
+                st.warning(f"Vorschau nicht möglich: {e}")
+
+        # Upload button uses cached bytes (not uploader handle)
         if st.button("📤 Foto speichern", key="save_photo_btn"):
-            if up is None:
+            if not (isinstance(pending, dict) and "raw" in pending):
                 st.warning("Bitte zuerst ein Foto auswählen oder aufnehmen.")
+            elif "error" in pending:
+                st.error(f"Datei konnte nicht gelesen werden: {pending.get('error')}")
             else:
-                data, mime, out_name = prepare_photo_payload(up)
+                raw = pending["raw"]
+                in_name = pending.get("name", "upload.bin")
+                in_mime = pending.get("mime", "application/octet-stream")
+
+                data, mime, out_name, mode = prepare_photo_payload_from_bytes(raw, in_name, in_mime)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 fname = f"{project}_{ts}_{out_name}"
 
                 ok = upload_bytes_to_drive(data, PHOTOS_FOLDER_ID, fname, mimetype=mime)
                 if ok:
-                    st.success("Foto hochgeladen.")
+                    st.success(f"Foto hochgeladen ({mode}).")
                     reset_photo_inputs()
                     sys_time.sleep(0.2)
                     st.rerun()
+
+        # Optional reset button
+        if st.button("♻️ Auswahl zurücksetzen", key="reset_photo_btn"):
+            reset_photo_inputs()
+            st.rerun()
 
         st.divider()
 
