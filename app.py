@@ -491,60 +491,85 @@ if role == "Mitarbeiter":
             sys_time.sleep(0.2)
             st.rerun()
 
+    
     with tab2:
         st.caption(
-            "Smartphone: Kamera-Aufnahme ist meist stabiler. "
-            "iPhone liefert oft HEIC, Android teils WEBP – wir speichern alles als JPEG (komprimiert)."
+            "📱 Smartphone: Streamlit 'camera_input' wird auf Mobile/Cloud teils nicht angezeigt. "
+            "Daher nutzen wir nur den Datei-Uploader (öffnet Kamera oder Galerie je nach Gerät). "
+            "HEIC/WEBP werden wenn möglich zu JPEG konvertiert – sonst laden wir das Original hoch."
         )
 
-        c_cam, c_up = st.columns(2)
-        with c_cam:
-            cam = st.camera_input("📸 Foto aufnehmen", key="camera_input")
-        with c_up:
-            up = st.file_uploader(
-                "🖼️ Foto aus Galerie / Dateien",
-                type=["jpg", "jpeg", "png", "heic", "webp"],
-                key="photo_upload_file",
-            )
-
-        # Exactly one source
-        src = cam if cam is not None else up
+        # Single uploader (mobile will offer Camera / Gallery)
+        up = st.file_uploader(
+            "📸 Foto aufnehmen oder auswählen",
+            type=["jpg", "jpeg", "png", "heic", "webp"],
+            accept_multiple_files=False,
+            key="photo_upload_file",
+        )
 
         def reset_photo_inputs():
-            # Widgets leeren (Kamera + Datei)
-            for k in ("camera_input", "photo_upload_file"):
-                if k in st.session_state:
-                    del st.session_state[k]
+            # Widget leeren (Uploader)
+            if "photo_upload_file" in st.session_state:
+                del st.session_state["photo_upload_file"]
 
-        # Preview after conversion (best effort)
-        if src is not None:
+        def prepare_photo_payload(upl):
+            """Return (bytes, mimetype, out_filename).
+            Tries JPEG normalize; if that fails (e.g., missing HEIC decoder), uploads original bytes.
+            """
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            in_name = getattr(upl, "name", None) or f"upload_{ts}.bin"
+            in_base, in_ext = os.path.splitext(in_name)
+            in_ext = (in_ext or ".bin").lower()
+            in_mime = getattr(upl, "type", None) or "application/octet-stream"
+            raw = upl.getvalue()
+
+            # Try normalize -> JPEG (best for preview + compatibility)
             try:
-                jpeg_bytes, _suggested = normalize_image_to_jpeg(src, max_side=2000, quality=82)
-                st.image(jpeg_bytes, width=320)
-                st.caption("Vorschau (nach Konvertierung/Kompression).")
-            except Exception as e:
-                st.warning(f"Vorschau/Konvertierung nicht möglich: {e}")
+                jpeg_bytes, suggested = normalize_image_to_jpeg(upl, max_side=2000, quality=82)
+                out_base = os.path.splitext(suggested)[0]
+                return jpeg_bytes, "image/jpeg", f"{out_base}.jpg"
+            except Exception:
+                # Fallback: upload original (still better than blocking upload)
+                return raw, in_mime, f"{in_base}{in_ext}"
 
-        # Save button (no form -> more stable on mobile)
-        if st.button("📤 Foto speichern", key="save_photo_btn"):
-            if src is None:
-                st.warning("Bitte zuerst ein Foto aufnehmen oder auswählen.")
+        # Debug info (helps diagnose mobile issues)
+        with st.expander("🔎 Debug (falls Upload nicht klappt)", expanded=False):
+            if up is None:
+                st.write("Keine Datei gewählt.")
             else:
                 try:
-                    jpeg_bytes, suggested = normalize_image_to_jpeg(src, max_side=2000, quality=82)
-                    fname = f"{project}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{suggested}"
-                    ok = upload_bytes_to_drive(jpeg_bytes, PHOTOS_FOLDER_ID, fname, mimetype="image/jpeg")
-                    if ok:
-                        st.success("Foto hochgeladen.")
-                        reset_photo_inputs()
-                        sys_time.sleep(0.2)
-                        st.rerun()
+                    st.write("MIME:", getattr(up, "type", None))
+                    st.write("Name:", getattr(up, "name", None))
+                    st.write("Bytes:", len(up.getvalue()))
                 except Exception as e:
-                    st.error(f"Foto konnte nicht verarbeitet werden: {e}")
+                    st.write("Debug Fehler:", e)
+
+        # Preview (best effort): show converted JPEG preview if possible
+        if up is not None:
+            try:
+                preview_bytes, _, _ = prepare_photo_payload(up)
+                st.image(preview_bytes, width=320)
+                st.caption("Vorschau (ggf. nach Konvertierung/Kompression).")
+            except Exception:
+                pass
+
+        if st.button("📤 Foto speichern", key="save_photo_btn"):
+            if up is None:
+                st.warning("Bitte zuerst ein Foto auswählen oder aufnehmen.")
+            else:
+                data, mime, out_name = prepare_photo_payload(up)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                fname = f"{project}_{ts}_{out_name}"
+
+                ok = upload_bytes_to_drive(data, PHOTOS_FOLDER_ID, fname, mimetype=mime)
+                if ok:
+                    st.success("Foto hochgeladen.")
+                    reset_photo_inputs()
+                    sys_time.sleep(0.2)
+                    st.rerun()
 
         st.divider()
 
-        # Show existing project photos (robust)
         files = list_files(PHOTOS_FOLDER_ID)
         shown = False
         for f in files:
@@ -561,6 +586,7 @@ if role == "Mitarbeiter":
             st.info("Keine Fotos für dieses Projekt vorhanden.")
 
     with tab3:
+
         files = list_files(UPLOADS_FOLDER_ID)
         found = False
         for f in files:
