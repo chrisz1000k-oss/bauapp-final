@@ -5,6 +5,7 @@ from datetime import datetime, time, timedelta
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -12,11 +13,11 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from PIL import Image, ImageOps
 
-# Optional HEIC support (iPhone)
 try:
-    import pillow_heif  # type: ignore
+    import pillow_heif
     pillow_heif.register_heif_opener()
 except Exception:
+    # HEIC support optional; app still works without it
     pillow_heif = None
 
 
@@ -25,10 +26,10 @@ except Exception:
 # =========================
 st.set_page_config(page_title="BauApp - R. Baumgartner", layout="wide")
 
+# Sidebar logo (robust path)
 logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
 if os.path.exists(logo_path):
     st.sidebar.image(logo_path, use_container_width=True)
-
 
 # =========================
 # CONSTANTS
@@ -52,7 +53,6 @@ RAPPORT_COLUMNS = [
     "Bemerkung",
 ]
 
-
 # =========================
 # SECRETS (STRICT)
 # =========================
@@ -61,7 +61,6 @@ def require_secret(key: str) -> str:
         st.error(f"Fehlendes Geheimnis: {key}")
         st.stop()
     return str(st.secrets[key]).strip()
-
 
 def require_section(section: str) -> dict:
     if section not in st.secrets:
@@ -73,12 +72,18 @@ def require_section(section: str) -> dict:
         st.stop()
     return data
 
-
-PHOTOS_FOLDER_ID = require_secret("PHOTOS_FOLDER_ID")
+PHOTOS_FOLDER_ID  = require_secret("PHOTOS_FOLDER_ID")
 UPLOADS_FOLDER_ID = require_secret("UPLOADS_FOLDER_ID")
 REPORTS_FOLDER_ID = require_secret("REPORTS_FOLDER_ID")
-ADMIN_PASSWORD = require_secret("ADMIN_PASSWORD")
+ADMIN_PASSWORD    = require_secret("ADMIN_PASSWORD")
 
+# Upload Satellite (Cloud Run)
+UPLOAD_SERVICE = require_section("upload_service")
+UPLOAD_SERVICE_URL = str(UPLOAD_SERVICE.get("url", "")).strip().rstrip("/")
+UPLOAD_SERVICE_TOKEN = str(UPLOAD_SERVICE.get("token", "")).strip()
+if not UPLOAD_SERVICE_URL or not UPLOAD_SERVICE_TOKEN:
+    st.error("Fehlende upload_service Konfiguration in secrets: [upload_service] url/token")
+    st.stop()
 
 # =========================
 # AUTH (OAuth Refresh Token)
@@ -105,21 +110,13 @@ def authenticate_drive():
         st.error(f"OAuth/Drive Fehler: {e}")
         st.stop()
 
-
 drive = authenticate_drive()
-
 
 # =========================
 # DRIVE HELPERS
 # =========================
 def drive_list(query: str, fields: str, page_size: int = 200):
-    return (
-        drive.files()
-        .list(q=query, fields=fields, pageSize=page_size)
-        .execute()
-        .get("files", [])
-    )
-
+    return drive.files().list(q=query, fields=fields, pageSize=page_size).execute().get("files", [])
 
 def find_file_in_folder_by_name(folder_id: str, name: str):
     try:
@@ -130,7 +127,6 @@ def find_file_in_folder_by_name(folder_id: str, name: str):
         st.error(f"Drive-Suche Fehler: {e}")
         return None
 
-
 def list_files(folder_id: str):
     try:
         q = f"'{folder_id}' in parents and trashed=false"
@@ -138,7 +134,6 @@ def list_files(folder_id: str):
     except Exception as e:
         st.error(f"Drive-Liste Fehler: {e}")
         return []
-
 
 def download_bytes(file_id: str):
     try:
@@ -153,7 +148,6 @@ def download_bytes(file_id: str):
         st.error(f"Download Fehler: {e}")
         return None
 
-
 def upload_bytes_to_folder(folder_id: str, filename: str, content_bytes: bytes, mimetype: str):
     try:
         meta = {"name": filename, "parents": [folder_id]}
@@ -164,7 +158,6 @@ def upload_bytes_to_folder(folder_id: str, filename: str, content_bytes: bytes, 
         st.error(f"Upload Fehler: {e}")
         return False
 
-
 def update_file_bytes(file_id: str, content_bytes: bytes, mimetype: str):
     try:
         media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mimetype, resumable=False)
@@ -174,15 +167,13 @@ def update_file_bytes(file_id: str, content_bytes: bytes, mimetype: str):
         st.error(f"Update Fehler: {e}")
         return False
 
-
 def upload_streamlit_file(uploaded_file, folder_id: str, filename: str):
-    """Upload as-is (used for plan/document uploads)."""
     try:
         meta = {"name": filename, "parents": [folder_id]}
         media = MediaIoBaseUpload(
             io.BytesIO(uploaded_file.getvalue()),
             mimetype=uploaded_file.type or "application/octet-stream",
-            resumable=False,
+            resumable=False
         )
         drive.files().create(body=meta, media_body=media, fields="id").execute()
         return True
@@ -190,9 +181,7 @@ def upload_streamlit_file(uploaded_file, folder_id: str, filename: str):
         st.error(f"Upload Fehler: {e}")
         return False
 
-
 def upload_bytes_to_drive(data: bytes, folder_id: str, filename: str, mimetype: str = "application/octet-stream"):
-    """Upload raw bytes (used for normalized JPEG uploads)."""
     try:
         meta = {"name": filename, "parents": [folder_id]}
         media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=False)
@@ -202,6 +191,30 @@ def upload_bytes_to_drive(data: bytes, folder_id: str, filename: str, mimetype: 
         st.error(f"Upload Fehler: {e}")
         return False
 
+def normalize_image_to_jpeg(uploaded_file, max_side: int = 2000, quality: int = 82):
+    """Convert various image inputs (JPG/PNG/WEBP/HEIC) to a compressed JPEG bytes payload.
+    Returns (jpeg_bytes, suggested_filename_ending_with_.jpg)
+    """
+    raw = uploaded_file.getvalue()
+    name = getattr(uploaded_file, "name", None) or f"camera_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+    base = os.path.splitext(name)[0]
+
+    img = Image.open(io.BytesIO(raw))
+    img = ImageOps.exif_transpose(img)
+
+    if img.mode not in ("RGB",):
+        img = img.convert("RGB")
+
+    w, h = img.size
+    mside = max(w, h)
+    if mside > max_side:
+        scale = max_side / float(mside)
+        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+        img = img.resize(new_size)
+
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=quality, optimize=True)
+    return out.getvalue(), f"{base}.jpg"
 
 def delete_file(file_id: str):
     try:
@@ -210,7 +223,6 @@ def delete_file(file_id: str):
     except Exception as e:
         st.error(f"Löschen Fehler: {e}")
         return False
-
 
 def ensure_subfolder(parent_id: str, folder_name: str) -> str:
     try:
@@ -233,47 +245,7 @@ def ensure_subfolder(parent_id: str, folder_name: str) -> str:
         st.error(f"Unterordner Fehler: {e}")
         st.stop()
 
-
 REPORTS_HOME_FOLDER_ID = ensure_subfolder(REPORTS_FOLDER_ID, REPORTS_SUBFOLDER_NAME)
-
-
-# =========================
-# IMAGE NORMALIZATION (JPEG)
-# =========================
-def _lanczos_resample():
-    # Pillow compatibility
-    try:
-        return Image.Resampling.LANCZOS  # Pillow >= 9
-    except Exception:
-        return Image.LANCZOS  # older Pillow
-
-
-def normalize_image_to_jpeg(uploaded_file, max_side: int = 2000, quality: int = 82):
-    """
-    Convert JPG/PNG/WEBP/HEIC -> compressed JPEG bytes.
-    Returns (jpeg_bytes, suggested_filename_ending_with_.jpg)
-    """
-    raw = uploaded_file.getvalue()
-    name = getattr(uploaded_file, "name", None) or f"camera_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-    base = os.path.splitext(name)[0]
-
-    img = Image.open(io.BytesIO(raw))
-    img = ImageOps.exif_transpose(img)
-
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-
-    w, h = img.size
-    mside = max(w, h)
-    if mside > max_side:
-        scale = max_side / float(mside)
-        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
-        img = img.resize(new_size, resample=_lanczos_resample())
-
-    out = io.BytesIO()
-    img.save(out, format="JPEG", quality=quality, optimize=True)
-    return out.getvalue(), f"{base}.jpg"
-
 
 # =========================
 # PROJECTS (Drive + Archive)
@@ -285,7 +257,6 @@ def save_projects_df(df: pd.DataFrame):
         update_file_bytes(fid, csv_bytes, "text/csv")
     else:
         upload_bytes_to_folder(REPORTS_FOLDER_ID, PROJECTS_CSV_NAME, csv_bytes, "text/csv")
-
 
 def load_projects_df() -> pd.DataFrame:
     fid = find_file_in_folder_by_name(REPORTS_FOLDER_ID, PROJECTS_CSV_NAME)
@@ -307,6 +278,7 @@ def load_projects_df() -> pd.DataFrame:
 
     if "Projekt" not in df.columns:
         df["Projekt"] = ""
+
     if "Status" not in df.columns:
         df["Status"] = "aktiv"
         save_projects_df(df)
@@ -319,13 +291,11 @@ def load_projects_df() -> pd.DataFrame:
 
     return df[PROJECTS_COLS].copy()
 
-
 def load_projects(include_archived: bool = False) -> list[str]:
     df = load_projects_df()
     if include_archived:
         return df["Projekt"].tolist()
     return df[df["Status"] != "archiviert"]["Projekt"].tolist()
-
 
 def add_or_restore_project(project_name: str):
     p = (project_name or "").strip()
@@ -342,7 +312,6 @@ def add_or_restore_project(project_name: str):
     save_projects_df(df)
     return True
 
-
 def set_project_status(project_name: str, status: str):
     p = (project_name or "").strip()
     if not p:
@@ -357,17 +326,14 @@ def set_project_status(project_name: str, status: str):
     save_projects_df(df)
     return True
 
-
 # =========================
 # RAPPORTS (clean schema)
 # =========================
 def report_csv_name(project: str) -> str:
     return f"{project}_Reports.csv"
 
-
 def get_report_file_id(project: str):
     return find_file_in_folder_by_name(REPORTS_HOME_FOLDER_ID, report_csv_name(project))
-
 
 def normalize_reports_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -392,7 +358,6 @@ def normalize_reports_df(df: pd.DataFrame) -> pd.DataFrame:
     df["Datum"] = df["Datum"].astype(str)
     return df
 
-
 def load_reports(project: str) -> pd.DataFrame:
     fid = get_report_file_id(project)
     if not fid:
@@ -409,12 +374,10 @@ def load_reports(project: str) -> pd.DataFrame:
 
     df_clean = normalize_reports_df(df)
 
-    # migration write-back
     if list(df_clean.columns) != list(df.columns):
         update_file_bytes(fid, df_clean.to_csv(index=False).encode("utf-8"), "text/csv")
 
     return df_clean
-
 
 def append_report(project: str, row: dict):
     fid = get_report_file_id(project)
@@ -429,9 +392,8 @@ def append_report(project: str, row: dict):
             REPORTS_HOME_FOLDER_ID,
             report_csv_name(project),
             df_new.to_csv(index=False).encode("utf-8"),
-            "text/csv",
+            "text/csv"
         )
-
 
 # =========================
 # UI
@@ -450,6 +412,7 @@ if role == "Mitarbeiter":
         st.stop()
 
     project = st.selectbox("Projekt:", projects_active)
+
     tab1, tab2, tab3 = st.tabs(["📝 Rapport", "📷 Fotos", "📂 Pläne"])
 
     with tab1:
@@ -491,115 +454,134 @@ if role == "Mitarbeiter":
             sys_time.sleep(0.2)
             st.rerun()
 
-    
+    # ===== FINAL FOTO TAB (Cloud Run Upload Satellite) =====
     with tab2:
         st.caption(
-            "📱 Android-Hinweis: Bei manchen Geräten verliert Streamlit nach dem Tippen auf einen Button "
-            "die Referenz auf die ausgewählte Datei. Darum speichern wir das Foto sofort in der Session "
-            "und laden es dann hoch. (Kamera/Galerie Auswahl kommt über 'Datei wählen'.)"
+            "📸 Fotos direkt vom Handy (Kamera oder Galerie). "
+            "Upload läuft stabil über den BauApp-Upload-Service."
         )
 
-        # --- Session keys
-        PENDING_KEY = "pending_photo"
-        UPLOADER_KEY = "photo_upload_file"
+        html = f"""
+        <div style="font-family:sans-serif; font-size:14px; max-width:460px;">
+          <label style="font-weight:bold;">Foto(s) hinzufügen:</label>
 
-        def reset_photo_inputs():
-            # Clear pending + uploader
-            for k in (PENDING_KEY, UPLOADER_KEY):
-                if k in st.session_state:
-                    del st.session_state[k]
+          <input id="fileInput"
+                 type="file"
+                 accept="image/*"
+                 multiple
+                 style="display:block; margin:10px 0; width:100%;"/>
 
-        def prepare_photo_payload_from_bytes(raw: bytes, in_name: str, in_mime: str):
-            """Return (bytes, mimetype, out_filename). Tries JPEG normalize using a temp-like wrapper."""
-            class _Wrap:
-                def __init__(self, b, name, mime):
-                    self._b = b
-                    self.name = name
-                    self.type = mime
-                def getvalue(self):
-                    return self._b
+          <button id="uploadBtn"
+            style="width:100%; padding:10px; border:0;
+                   border-radius:8px; background:#ff4b4b;
+                   color:white; font-size:15px; cursor:pointer;">
+            📤 Hochladen
+          </button>
 
-            upl = _Wrap(raw, in_name, in_mime)
-            try:
-                jpeg_bytes, suggested = normalize_image_to_jpeg(upl, max_side=2000, quality=82)
-                out_base = os.path.splitext(suggested)[0]
-                return jpeg_bytes, "image/jpeg", f"{out_base}.jpg", "JPEG (komprimiert)"
-            except Exception:
-                base, ext = os.path.splitext(in_name or "upload.bin")
-                ext = (ext or ".bin").lower()
-                return raw, (in_mime or "application/octet-stream"), f"{base}{ext}", "Original (ohne Konvertierung)"
+          <div id="status" style="margin-top:10px; min-height:20px;"></div>
 
-        def on_photo_selected():
-            upl = st.session_state.get(UPLOADER_KEY)
-            if upl is None:
-                return
-            try:
-                raw = upl.getvalue()
-                st.session_state[PENDING_KEY] = {
-                    "raw": raw,
-                    "name": getattr(upl, "name", None) or "upload.bin",
-                    "mime": getattr(upl, "type", None) or "application/octet-stream",
-                    "size": len(raw),
-                    "ts": datetime.now().strftime("%Y%m%d_%H%M%S"),
-                }
-            except Exception as e:
-                st.session_state[PENDING_KEY] = {"error": str(e)}
+          <div id="progressWrap" style="display:none; margin-top:8px;">
+            <div style="height:10px; background:#e5e7eb;
+                        border-radius:6px; overflow:hidden;">
+              <div id="progressBar"
+                   style="height:10px; width:0%;
+                          background:#16a34a;"></div>
+            </div>
+          </div>
 
-        # --- Uploader with on_change -> cache bytes in session (Android-stabil)
-        st.file_uploader(
-            "📸 Foto aufnehmen oder auswählen (Android: tippe auf 'Datei wählen')",
-            type=["jpg", "jpeg", "png", "heic", "webp"],
-            accept_multiple_files=False,
-            key=UPLOADER_KEY,
-            on_change=on_photo_selected,
-        )
+          <div style="margin-top:8px; color:#6b7280; font-size:12px;">
+            Tipp: Du kannst mehrere Fotos auswählen (Galerie) oder ein Foto aufnehmen (Kamera-Auswahl kommt vom Handy).
+          </div>
+        </div>
 
-        pending = st.session_state.get(PENDING_KEY)
+        <script>
+          const input = document.getElementById("fileInput");
+          const btn = document.getElementById("uploadBtn");
+          const statusEl = document.getElementById("status");
+          const wrap = document.getElementById("progressWrap");
+          const bar = document.getElementById("progressBar");
 
-        with st.expander("🔎 Debug (Android)", expanded=False):
-            st.write("pending vorhanden:", pending is not None)
-            if isinstance(pending, dict):
-                for k in ["name", "mime", "size", "ts", "error"]:
-                    if k in pending:
-                        st.write(f"{k}:", pending.get(k))
+          function setStatus(msg, color="#111") {{
+            statusEl.innerHTML = msg;
+            statusEl.style.color = color;
+          }}
 
-        # Preview + info
-        if isinstance(pending, dict) and "raw" in pending:
-            raw = pending["raw"]
-            in_name = pending.get("name", "upload.bin")
-            in_mime = pending.get("mime", "application/octet-stream")
-            try:
-                preview_bytes, _pmime, _pname, mode = prepare_photo_payload_from_bytes(raw, in_name, in_mime)
-                st.image(preview_bytes, width=320)
-                st.caption(f"Vorschau: {mode}")
-            except Exception as e:
-                st.warning(f"Vorschau nicht möglich: {e}")
+          function setProgress(pct) {{
+            bar.style.width = pct + "%";
+          }}
 
-        # Upload button uses cached bytes (not uploader handle)
-        if st.button("📤 Foto speichern", key="save_photo_btn"):
-            if not (isinstance(pending, dict) and "raw" in pending):
-                st.warning("Bitte zuerst ein Foto auswählen oder aufnehmen.")
-            elif "error" in pending:
-                st.error(f"Datei konnte nicht gelesen werden: {pending.get('error')}")
-            else:
-                raw = pending["raw"]
-                in_name = pending.get("name", "upload.bin")
-                in_mime = pending.get("mime", "application/octet-stream")
+          function uploadOne(file) {{
+            return new Promise((resolve) => {{
+              const fd = new FormData();
+              fd.append("project", "{project}");
+              fd.append("file", file, file.name);
 
-                data, mime, out_name, mode = prepare_photo_payload_from_bytes(raw, in_name, in_mime)
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                fname = f"{project}_{ts}_{out_name}"
+              const xhr = new XMLHttpRequest();
+              xhr.open("POST", "{UPLOAD_SERVICE_URL}/upload", true);
+              xhr.setRequestHeader("X-Upload-Token", "{UPLOAD_SERVICE_TOKEN}");
 
-                ok = upload_bytes_to_drive(data, PHOTOS_FOLDER_ID, fname, mimetype=mime)
-                if ok:
-                    st.success(f"Foto hochgeladen ({mode}).")
-                    reset_photo_inputs()
-                    sys_time.sleep(0.2)
-                    st.rerun()
+              xhr.upload.onprogress = (e) => {{
+                if (e.lengthComputable) {{
+                  const p = Math.round((e.loaded / e.total) * 100);
+                  setProgress(p);
+                }}
+              }};
 
-        # Optional reset button
-        if st.button("♻️ Auswahl zurücksetzen", key="reset_photo_btn"):
-            reset_photo_inputs()
+              xhr.onload = () => {{
+                try {{
+                  const data = JSON.parse(xhr.responseText || "{{}}");
+                  if (xhr.status >= 200 && xhr.status < 300) {{
+                    resolve({{ok:true, filename: data.filename || file.name}});
+                  }} else {{
+                    resolve({{ok:false, err: (data.detail || xhr.responseText || "Upload-Fehler")}});
+                  }}
+                }} catch (e) {{
+                  resolve({{ok:false, err: (xhr.responseText || "Upload-Fehler")}});
+                }}
+              }};
+
+              xhr.onerror = () => resolve({{ok:false, err:"Netzwerkfehler"}});
+              xhr.send(fd);
+            }});
+          }}
+
+          btn.onclick = async () => {{
+            if (!input.files || input.files.length === 0) {{
+              setStatus("Bitte mindestens ein Foto auswählen.", "#b45309");
+              return;
+            }}
+
+            btn.disabled = true;
+            btn.style.opacity = "0.7";
+            wrap.style.display = "block";
+            setProgress(0);
+
+            const files = Array.from(input.files);
+            let okCount = 0;
+
+            for (let i = 0; i < files.length; i++) {{
+              setStatus(`Upload ${i+1} / ${files.length} …`, "#111");
+              const res = await uploadOne(files[i]);
+              if (res.ok) {{
+                okCount += 1;
+                setStatus(`✅ ${okCount}/${files.length} hochgeladen …`, "#16a34a");
+              }} else {{
+                setStatus(`❌ Fehler bei Datei ${i+1}: ${res.err}`, "#dc2626");
+              }}
+              setProgress(0);
+            }}
+
+            setStatus("✅ Upload abgeschlossen. Bitte 'Liste aktualisieren' klicken.", "#16a34a");
+            btn.disabled = false;
+            btn.style.opacity = "1.0";
+            input.value = "";
+          }};
+        </script>
+        """
+
+        components.html(html, height=270)
+
+        if st.button("🔄 Liste aktualisieren", key="refresh_photo_list"):
             st.rerun()
 
         st.divider()
@@ -620,7 +602,6 @@ if role == "Mitarbeiter":
             st.info("Keine Fotos für dieses Projekt vorhanden.")
 
     with tab3:
-
         files = list_files(UPLOADS_FOLDER_ID)
         found = False
         for f in files:
@@ -630,11 +611,10 @@ if role == "Mitarbeiter":
                     f"⬇️ {f['name']}",
                     data=download_bytes(f["id"]),
                     file_name=f["name"],
-                    key=f["id"],
+                    key=f["id"]
                 )
         if not found:
             st.info("Keine Pläne/Dokumente vorhanden.")
-
 
 # ===== Admin =====
 else:
@@ -698,7 +678,7 @@ else:
                     "⬇️ Rapporte als CSV herunterladen",
                     data=df.to_csv(index=False).encode("utf-8"),
                     file_name=report_csv_name(proj),
-                    mime="text/csv",
+                    mime="text/csv"
                 )
 
     with t_plans:
@@ -746,10 +726,7 @@ else:
                     any_ = True
                     data = download_bytes(f["id"])
                     if data:
-                        try:
-                            st.image(data, width=220)
-                        except Exception:
-                            st.write(f"📎 {f['name']} (Vorschau nicht möglich)")
+                        st.image(data, width=220)
                     if st.button("🗑 Foto löschen", key=f"del_photo_{f['id']}"):
                         delete_file(f["id"])
                         st.rerun()
