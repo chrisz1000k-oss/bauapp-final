@@ -404,25 +404,102 @@ if role == "Mitarbeiter":
             st.rerun()
 
     with tab2:
-        st.caption("Smartphone: iPhone oft HEIC, Android oft WEBP.")
+        st.caption("📱 Foto-Upload läuft über den BauApp-Upload-Service (Cloud Run). "
+                   "Auf Android/iPhone kannst du damit Kamera oder Galerie auswählen. "
+                   "Nach dem Upload bitte unten auf „🔄 Liste aktualisieren“ klicken.")
 
-        with st.form("photo_upload_form", clear_on_submit=True):
-            up = st.file_uploader(
-                "Foto hochladen",
-                type=["jpg", "jpeg", "png", "heic", "webp"],
-                key="photo_upload_file"
-            )
-            submit_photo = st.form_submit_button("📤 Foto speichern")
+        # --- Upload-Service Konfiguration aus Streamlit Secrets ---
+        if "upload_service" not in st.secrets or "url" not in st.secrets["upload_service"] or "token" not in st.secrets["upload_service"]:
+            st.error("Upload-Service ist nicht konfiguriert. Bitte in Streamlit Secrets [upload_service] url + token setzen.")
+            st.stop()
 
-        if submit_photo:
-            if up is None:
-                st.warning("Bitte zuerst ein Foto auswählen.")
-            else:
-                fname = f"{project}_{up.name}"
-                if upload_streamlit_file(up, PHOTOS_FOLDER_ID, fname):
-                    st.success("Foto hochgeladen.")
-                    sys_time.sleep(0.2)
-                    st.rerun()
+        upload_url = str(st.secrets["upload_service"]["url"]).strip().rstrip("/")
+        upload_token = str(st.secrets["upload_service"]["token"]).strip()
+
+        # --- Stabiler Upload via HTML + fetch (kein st.file_uploader / keine WebSockets) ---
+        # Hinweis: Absichtlich KEIN Streamlit-Button für Upload, damit kein rerun den Upload abbricht.
+        html = f"""
+        <div style="border:1px solid rgba(255,255,255,0.12); border-radius:12px; padding:14px; max-width:520px;">
+          <div style="font-family: sans-serif; font-size: 14px; margin-bottom: 8px;">
+            <b>Foto auswählen oder aufnehmen</b>
+          </div>
+
+          <input
+            type="file"
+            id="bauappFile"
+            accept="image/*"
+            style="margin-bottom: 10px; width: 100%;"
+          />
+
+          <button
+            type="button"
+            onclick="bauappUpload()"
+            style="background:#ff4b4b; color:white; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; font-size:14px;"
+          >
+            📤 Hochladen
+          </button>
+
+          <div id="bauappStatus" style="margin-top:10px; font-family:sans-serif; font-size:14px;"></div>
+          <div style="margin-top:8px; font-family:sans-serif; font-size:12px; opacity:0.75;">
+            Tipp: Wenn du nach dem Upload das neue Bild nicht sofort siehst, klicke unten auf „Liste aktualisieren“.
+          </div>
+        </div>
+
+        <script>
+          async function bauappUpload() {{
+            const status = document.getElementById("bauappStatus");
+            const input = document.getElementById("bauappFile");
+
+            if (!input || !input.files || input.files.length === 0) {{
+              status.innerText = "❌ Bitte zuerst ein Foto auswählen.";
+              return;
+            }}
+
+            const file = input.files[0];
+
+            // Build form data
+            const fd = new FormData();
+            fd.append("project", "{project}");
+            fd.append("file", file, file.name);
+
+            status.innerText = "⏳ Upload läuft...";
+
+            try {{
+              const res = await fetch("{upload_url}/upload", {{
+                method: "POST",
+                headers: {{
+                  "x-upload-token": "{upload_token}"
+                }},
+                body: fd
+              }});
+
+              if (res.ok) {{
+                status.innerText = "✅ Upload erfolgreich. Bitte unten „Liste aktualisieren“ klicken.";
+              }} else {{
+                let msg = "";
+                try {{
+                  const j = await res.json();
+                  msg = (j && (j.detail || j.message)) ? (j.detail || j.message) : "";
+                }} catch (e) {{}}
+                status.innerText = "❌ Upload fehlgeschlagen (" + res.status + "). " + msg;
+              }}
+            }} catch (err) {{
+              status.innerText = "❌ Netzwerkfehler beim Upload. Bitte Verbindung prüfen und erneut versuchen.";
+            }}
+          }}
+        </script>
+        """
+        st.components.v1.html(html, height=260)
+
+        colA, colB = st.columns([0.35, 0.65])
+        with colA:
+            if st.button("🔄 Liste aktualisieren", key="refresh_photos"):
+                st.rerun()
+        with colB:
+            st.caption("Hinweis: Der Upload startet über den roten HTML-Button oben. "
+                       "Der Refresh-Button lädt nur die Foto-Liste neu.")
+
+        st.divider()
 
         files = list_files(PHOTOS_FOLDER_ID)
         shown = False
@@ -430,10 +507,21 @@ if role == "Mitarbeiter":
             if f["name"].startswith(project + "_"):
                 data = download_bytes(f["id"])
                 if data:
-                    st.image(data, width=320)
+                    try:
+                        st.image(data, width=320)
+                    except Exception:
+                        st.download_button(
+                            f"⬇️ {f['name']} (Anzeige nicht möglich)",
+                            data=data,
+                            file_name=f["name"],
+                            key=f"dl_{f['id']}"
+                        )
                     shown = True
         if not shown:
             st.info("Keine Fotos für dieses Projekt vorhanden.")
+
+
+    with tab3:
 
     with tab3:
         files = list_files(UPLOADS_FOLDER_ID)
