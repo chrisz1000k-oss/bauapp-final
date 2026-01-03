@@ -5,21 +5,11 @@ from datetime import datetime, time, timedelta
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
-from PIL import Image, ImageOps
-
-try:
-    import pillow_heif
-    pillow_heif.register_heif_opener()
-except Exception:
-    # HEIC support optional; app still works without it
-    pillow_heif = None
-
 
 # =========================
 # PAGE
@@ -76,14 +66,6 @@ PHOTOS_FOLDER_ID  = require_secret("PHOTOS_FOLDER_ID")
 UPLOADS_FOLDER_ID = require_secret("UPLOADS_FOLDER_ID")
 REPORTS_FOLDER_ID = require_secret("REPORTS_FOLDER_ID")
 ADMIN_PASSWORD    = require_secret("ADMIN_PASSWORD")
-
-# Upload Satellite (Cloud Run)
-UPLOAD_SERVICE = require_section("upload_service")
-UPLOAD_SERVICE_URL = str(UPLOAD_SERVICE.get("url", "")).strip().rstrip("/")
-UPLOAD_SERVICE_TOKEN = str(UPLOAD_SERVICE.get("token", "")).strip()
-if not UPLOAD_SERVICE_URL or not UPLOAD_SERVICE_TOKEN:
-    st.error("Fehlende upload_service Konfiguration in secrets: [upload_service] url/token")
-    st.stop()
 
 # =========================
 # AUTH (OAuth Refresh Token)
@@ -181,41 +163,6 @@ def upload_streamlit_file(uploaded_file, folder_id: str, filename: str):
         st.error(f"Upload Fehler: {e}")
         return False
 
-def upload_bytes_to_drive(data: bytes, folder_id: str, filename: str, mimetype: str = "application/octet-stream"):
-    try:
-        meta = {"name": filename, "parents": [folder_id]}
-        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=False)
-        drive.files().create(body=meta, media_body=media, fields="id").execute()
-        return True
-    except Exception as e:
-        st.error(f"Upload Fehler: {e}")
-        return False
-
-def normalize_image_to_jpeg(uploaded_file, max_side: int = 2000, quality: int = 82):
-    """Convert various image inputs (JPG/PNG/WEBP/HEIC) to a compressed JPEG bytes payload.
-    Returns (jpeg_bytes, suggested_filename_ending_with_.jpg)
-    """
-    raw = uploaded_file.getvalue()
-    name = getattr(uploaded_file, "name", None) or f"camera_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-    base = os.path.splitext(name)[0]
-
-    img = Image.open(io.BytesIO(raw))
-    img = ImageOps.exif_transpose(img)
-
-    if img.mode not in ("RGB",):
-        img = img.convert("RGB")
-
-    w, h = img.size
-    mside = max(w, h)
-    if mside > max_side:
-        scale = max_side / float(mside)
-        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
-        img = img.resize(new_size)
-
-    out = io.BytesIO()
-    img.save(out, format="JPEG", quality=quality, optimize=True)
-    return out.getvalue(), f"{base}.jpg"
-
 def delete_file(file_id: str):
     try:
         drive.files().delete(fileId=file_id).execute()
@@ -264,7 +211,7 @@ def load_projects_df() -> pd.DataFrame:
     if not fid:
         defaults = ["Neubau Müller", "Sanierung West", "Dachstock Meier"]
         df = pd.DataFrame({"Projekt": defaults, "Status": ["aktiv"] * len(defaults)})
-        save_projects_df(df)
+        save_projects_df(df)  # create immediately
         return df
 
     content = download_bytes(fid)
@@ -339,6 +286,7 @@ def normalize_reports_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=RAPPORT_COLUMNS)
 
+    # remove known legacy cols
     for c in list(df.columns):
         lc = str(c).strip().lower()
         if lc in ["timestamp", "erfasst_am", "erfasst am", "pause", "pause2", "pause_2"]:
@@ -374,6 +322,7 @@ def load_reports(project: str) -> pd.DataFrame:
 
     df_clean = normalize_reports_df(df)
 
+    # migration write-back
     if list(df_clean.columns) != list(df.columns):
         update_file_bytes(fid, df_clean.to_csv(index=False).encode("utf-8"), "text/csv")
 
@@ -454,137 +403,26 @@ if role == "Mitarbeiter":
             sys_time.sleep(0.2)
             st.rerun()
 
-    # ===== FINAL FOTO TAB (Cloud Run Upload Satellite) =====
     with tab2:
-        st.caption(
-            "📸 Fotos direkt vom Handy (Kamera oder Galerie). "
-            "Upload läuft stabil über den BauApp-Upload-Service."
-        )
+        st.caption("Smartphone: iPhone oft HEIC, Android oft WEBP.")
 
-        html = f"""
-        <div style="font-family:sans-serif; font-size:14px; max-width:460px;">
-          <label style="font-weight:bold;">Foto(s) hinzufügen:</label>
+        with st.form("photo_upload_form", clear_on_submit=True):
+            up = st.file_uploader(
+                "Foto hochladen",
+                type=["jpg", "jpeg", "png", "heic", "webp"],
+                key="photo_upload_file"
+            )
+            submit_photo = st.form_submit_button("📤 Foto speichern")
 
-          <input id="fileInput"
-                 type="file"
-                 accept="image/*"
-                 multiple
-                 style="display:block; margin:10px 0; width:100%;"/>
-
-          <button id="uploadBtn"
-            style="width:100%; padding:10px; border:0;
-                   border-radius:8px; background:#ff4b4b;
-                   color:white; font-size:15px; cursor:pointer;">
-            📤 Hochladen
-          </button>
-
-          <div id="status" style="margin-top:10px; min-height:20px;"></div>
-
-          <div id="progressWrap" style="display:none; margin-top:8px;">
-            <div style="height:10px; background:#e5e7eb;
-                        border-radius:6px; overflow:hidden;">
-              <div id="progressBar"
-                   style="height:10px; width:0%;
-                          background:#16a34a;"></div>
-            </div>
-          </div>
-
-          <div style="margin-top:8px; color:#6b7280; font-size:12px;">
-            Tipp: Du kannst mehrere Fotos auswählen (Galerie) oder ein Foto aufnehmen (Kamera-Auswahl kommt vom Handy).
-          </div>
-        </div>
-
-        <script>
-          const input = document.getElementById("fileInput");
-          const btn = document.getElementById("uploadBtn");
-          const statusEl = document.getElementById("status");
-          const wrap = document.getElementById("progressWrap");
-          const bar = document.getElementById("progressBar");
-
-          function setStatus(msg, color="#111") {{
-            statusEl.innerHTML = msg;
-            statusEl.style.color = color;
-          }}
-
-          function setProgress(pct) {{
-            bar.style.width = pct + "%";
-          }}
-
-          function uploadOne(file) {{
-            return new Promise((resolve) => {{
-              const fd = new FormData();
-              fd.append("project", "{project}");
-              fd.append("file", file, file.name);
-
-              const xhr = new XMLHttpRequest();
-              xhr.open("POST", "{UPLOAD_SERVICE_URL}/upload", true);
-              xhr.setRequestHeader("X-Upload-Token", "{UPLOAD_SERVICE_TOKEN}");
-
-              xhr.upload.onprogress = (e) => {{
-                if (e.lengthComputable) {{
-                  const p = Math.round((e.loaded / e.total) * 100);
-                  setProgress(p);
-                }}
-              }};
-
-              xhr.onload = () => {{
-                try {{
-                  const data = JSON.parse(xhr.responseText || "{{}}");
-                  if (xhr.status >= 200 && xhr.status < 300) {{
-                    resolve({{ok:true, filename: data.filename || file.name}});
-                  }} else {{
-                    resolve({{ok:false, err: (data.detail || xhr.responseText || "Upload-Fehler")}});
-                  }}
-                }} catch (e) {{
-                  resolve({{ok:false, err: (xhr.responseText || "Upload-Fehler")}});
-                }}
-              }};
-
-              xhr.onerror = () => resolve({{ok:false, err:"Netzwerkfehler"}});
-              xhr.send(fd);
-            }});
-          }}
-
-          btn.onclick = async () => {{
-            if (!input.files || input.files.length === 0) {{
-              setStatus("Bitte mindestens ein Foto auswählen.", "#b45309");
-              return;
-            }}
-
-            btn.disabled = true;
-            btn.style.opacity = "0.7";
-            wrap.style.display = "block";
-            setProgress(0);
-
-            const files = Array.from(input.files);
-            let okCount = 0;
-
-            for (let i = 0; i < files.length; i++) {{
-              setStatus(`Upload ${i+1} / ${files.length} …`, "#111");
-              const res = await uploadOne(files[i]);
-              if (res.ok) {{
-                okCount += 1;
-                setStatus(`✅ ${okCount}/${files.length} hochgeladen …`, "#16a34a");
-              }} else {{
-                setStatus(`❌ Fehler bei Datei ${i+1}: ${res.err}`, "#dc2626");
-              }}
-              setProgress(0);
-            }}
-
-            setStatus("✅ Upload abgeschlossen. Bitte 'Liste aktualisieren' klicken.", "#16a34a");
-            btn.disabled = false;
-            btn.style.opacity = "1.0";
-            input.value = "";
-          }};
-        </script>
-        """
-
-        components.html(html, height=270)
-
-        if st.button("🔄 Liste aktualisieren", key="refresh_photo_list"):
-            st.rerun()
-
-        st.divider()
+        if submit_photo:
+            if up is None:
+                st.warning("Bitte zuerst ein Foto auswählen.")
+            else:
+                fname = f"{project}_{up.name}"
+                if upload_streamlit_file(up, PHOTOS_FOLDER_ID, fname):
+                    st.success("Foto hochgeladen.")
+                    sys_time.sleep(0.2)
+                    st.rerun()
 
         files = list_files(PHOTOS_FOLDER_ID)
         shown = False
@@ -592,12 +430,8 @@ if role == "Mitarbeiter":
             if f["name"].startswith(project + "_"):
                 data = download_bytes(f["id"])
                 if data:
-                    try:
-                        st.image(data, width=320)
-                    except Exception:
-                        st.write(f"📎 {f['name']} (Vorschau nicht möglich)")
+                    st.image(data, width=320)
                     shown = True
-
         if not shown:
             st.info("Keine Fotos für dieses Projekt vorhanden.")
 
