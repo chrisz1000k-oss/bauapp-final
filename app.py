@@ -522,8 +522,6 @@ if role == "Mitarbeiter":
 
 
     with tab3:
-
-    with tab3:
         files = list_files(UPLOADS_FOLDER_ID)
         found = False
         for f in files:
