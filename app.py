@@ -293,24 +293,60 @@ if mode == "👷 Mitarbeiter":
             else: st.error("Name fehlt.")
         
         st.divider()
-        st.caption("Verlauf (Letzte Einträge)")
+        # ----------------------------------------------------
+        # UPDATE: RAPPORTE MIT REFRESH UND BESSERER ANSICHT
+        # ----------------------------------------------------
+        st.subheader("📌 Rapporte im Projekt (aktuell)")
+        
+        if st.button("🔄 Rapporte aktualisieren", key="ref_reports"):
+            st.rerun()
+
         df_h, _ = get_reports_df(project)
-        if not df_h.empty: st.dataframe(df_h.tail(5), use_container_width=True)
+        if not df_h.empty:
+            # Sortierung (optional, aber hilfreich: Neueste oben)
+            try:
+                # Versuchen nach Datum zu sortieren, falls Format passt
+                df_h_sorted = df_h.sort_values(by="Datum", ascending=False)
+            except:
+                df_h_sorted = df_h
+            
+            # Zeige die letzten 20 Einträge
+            st.dataframe(df_h_sorted.head(20), use_container_width=True)
+        else:
+            st.info("Noch keine Einträge.")
 
     with t2:
         cloudrun_upload_widget(project=project, bucket="photos", title="Foto hochladen", help_text="Kamera/Galerie wählbar.")
-        if st.button("🔄 Aktualisieren", key="ref_photos"): st.rerun()
+        if st.button("🔄 Fotos aktualisieren", key="ref_photos"): st.rerun()
+        
         files = list_files(PHOTOS_FOLDER_ID)
-        for f in [x for x in files if x['name'].startswith(project + "_")][:20]:
-            st.write(f"🖼️ {f['name']}")
+        proj_files = [x for x in files if x['name'].startswith(project + "_")]
+        
+        if proj_files:
+            # ----------------------------------------------------
+            # UPDATE: FOTOS ANZEIGEN STATT NUR TEXT
+            # ----------------------------------------------------
+            st.write(f"Gefundene Fotos: {len(proj_files)}")
+            # Limit auf 10 Bilder um Ladezeiten gering zu halten
+            for f in proj_files[:10]:
+                st.write(f"🖼️ {f['name']}")
+                img_data = download_bytes(f['id'])
+                if img_data:
+                    st.image(img_data, width=300)
+        else:
+            st.info("Keine Fotos vorhanden.")
 
     with t3:
         files = list_files(UPLOADS_FOLDER_ID)
-        for f in [x for x in files if x['name'].startswith(project + "_")]:
-            c1, c2 = st.columns([0.8, 0.2])
-            c1.write(f"📄 {f['name']}")
-            d = download_bytes(f['id'])
-            if d: c2.download_button("⬇️", d, f['name'])
+        proj_files = [x for x in files if x['name'].startswith(project + "_")]
+        if proj_files:
+            for f in proj_files:
+                c1, c2 = st.columns([0.8, 0.2])
+                c1.write(f"📄 {f['name']}")
+                d = download_bytes(f['id'])
+                if d: c2.download_button("⬇️", d, f['name'])
+        else:
+            st.info("Keine Dokumente hinterlegt.")
 
 elif mode == "🛠️ Admin":
     st.title("Admin")
@@ -331,7 +367,28 @@ elif mode == "🛠️ Admin":
         sel_p = st.selectbox("Projekt", projs)
         cloudrun_upload_widget(project=sel_p, bucket="uploads", title="Plan hochladen", help_text="Für Dokumente/Pläne.")
         if st.button("🔄 Aktualisieren", key="ref_admin"): st.rerun()
-        for f in [x for x in list_files(UPLOADS_FOLDER_ID) if x['name'].startswith(sel_p + "_")]:
-            c1, c2 = st.columns([0.8, 0.2])
+        
+        st.write("---")
+        st.write("Dateien im Ordner:")
+        
+        files = list_files(UPLOADS_FOLDER_ID)
+        proj_files = [x for x in files if x['name'].startswith(sel_p + "_")]
+        
+        for f in proj_files:
+            # ----------------------------------------------------
+            # UPDATE: DOWNLOAD BUTTON FÜR ADMIN HINZUGEFÜGT
+            # ----------------------------------------------------
+            c1, c2, c3 = st.columns([0.6, 0.2, 0.2])
             c1.write(f"📄 {f['name']}")
-            if c2.button("🗑", key=f['id']): delete_file(f['id']); st.rerun()
+            
+            d = download_bytes(f['id'])
+            if d:
+                c2.download_button("⬇️", d, f['name'], key=f"dl_{f['id']}")
+            
+            if c3.button("🗑", key=f"del_{f['id']}"): 
+                delete_file(f['id'])
+                st.success("Gelöscht!")
+                sys_time.sleep(0.5)
+                st.rerun()
+    else:
+        st.info("Erstelle zuerst ein aktives Projekt.")
