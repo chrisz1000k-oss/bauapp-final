@@ -56,15 +56,21 @@ ADMIN_PIN = sget("ADMIN_PIN", "1234")
 upload_section = st.secrets.get("upload_service")
 
 # Prüfung gemäß Protokoll: Muss eine Sektion (Dict) sein
-if not upload_section or not isinstance(upload_section, dict):
+if not upload_section:
     st.error("Konfigurations-Fehler: Die Sektion [upload_service] fehlt in secrets.toml oder steht nicht am Ende der Datei.")
     st.stop()
 
-UPLOAD_SERVICE_URL = str(upload_section.get("url", "")).strip().rstrip("/")
-UPLOAD_SERVICE_TOKEN = str(upload_section.get("token", "")).strip()
+# Hinweis: Streamlit Secrets können sich wie Dicts verhalten, auch wenn sie Proxy-Objekte sind.
+# Wir versuchen direkt auf die Keys zuzugreifen.
+try:
+    UPLOAD_SERVICE_URL = str(upload_section["url"]).strip().rstrip("/")
+    UPLOAD_SERVICE_TOKEN = str(upload_section["token"]).strip()
+except KeyError:
+    st.error("Konfigurations-Fehler: 'url' oder 'token' fehlen INNERHALB der Sektion [upload_service].")
+    st.stop()
 
 if not UPLOAD_SERVICE_URL or not UPLOAD_SERVICE_TOKEN:
-    st.error("Konfigurations-Fehler: 'url' oder 'token' fehlen in der Sektion [upload_service].")
+    st.error("Konfigurations-Fehler: Werte in [upload_service] sind leer.")
     st.stop()
 
 # =========================
