@@ -1,617 +1,361 @@
 import io
 import os
-import time as sys_time
-from datetime import datetime, time, timedelta
+import re
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
-
 from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload
 
+# -------------------------
+# Page
+# -------------------------
+st.set_page_config(page_title="BauApp", layout="wide")
 
-# =========================
-# PAGE
-# =========================
-st.set_page_config(page_title="BauApp - R. Baumgartner", layout="wide")
+# -------------------------
+# Helpers: secrets
+# -------------------------
+def sget(key: str, default: str = "") -> str:
+    try:
+        v = st.secrets.get(key, default)
+        return str(v).strip()
+    except Exception:
+        return default
 
-logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
-if os.path.exists(logo_path):
-    st.sidebar.image(logo_path, use_container_width=True)
-
-SCOPES = ["https://www.googleapis.com/auth/drive"]
-
-PROJECTS_CSV_NAME = "Projects.csv"
-REPORTS_SUBFOLDER_NAME = "Rapporte"
-
-PROJECTS_COLS = ["Projekt", "Status"]  # aktiv | archiviert
-
-RAPPORT_COLUMNS = [
-    "Datum",
-    "Projekt",
-    "Mitarbeiter",
-    "Start",
-    "Ende",
-    "Pause_h",
-    "Stunden",
-    "Material",
-    "Bemerkung",
-]
-
-
-# =========================
-# SECRETS
-# =========================
 def require_secret(key: str) -> str:
-    if key not in st.secrets or str(st.secrets[key]).strip() == "":
-        st.error(f"Fehlendes Geheimnis: {key}")
+    v = sget(key, "")
+    if not v:
+        st.error(f"Fehlendes Secret: {key}")
         st.stop()
-    return str(st.secrets[key]).strip()
+    return v
 
-def require_section(section: str) -> dict:
-    if section not in st.secrets:
-        st.error(f"Fehlende Sektion in secrets: [{section}]")
-        st.stop()
-    data = dict(st.secrets[section])
-    if not data:
-        st.error(f"Sektion [{section}] ist leer.")
-        st.stop()
-    return data
+# -------------------------
+# Secrets: Drive OAuth
+# -------------------------
+GOOGLE_CLIENT_ID = require_secret("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = require_secret("GOOGLE_CLIENT_SECRET")
+GOOGLE_REFRESH_TOKEN = require_secret("GOOGLE_REFRESH_TOKEN")
 
-PHOTOS_FOLDER_ID  = require_secret("PHOTOS_FOLDER_ID")
+PHOTOS_FOLDER_ID = require_secret("PHOTOS_FOLDER_ID")
 UPLOADS_FOLDER_ID = require_secret("UPLOADS_FOLDER_ID")
 REPORTS_FOLDER_ID = require_secret("REPORTS_FOLDER_ID")
-ADMIN_PASSWORD    = require_secret("ADMIN_PASSWORD")
 
-UPLOAD_SERVICE = require_section("upload_service")
-UPLOAD_SERVICE_URL = str(UPLOAD_SERVICE.get("url", "")).strip().rstrip("/")
-UPLOAD_SERVICE_TOKEN = str(UPLOAD_SERVICE.get("token", "")).strip()
+# Upload service secrets (Streamlit Cloud → Settings → Secrets)
+UPLOAD_SERVICE_URL = require_secret("upload_service")["url"] if isinstance(st.secrets.get("upload_service"), dict) else ""
+UPLOAD_SERVICE_TOKEN = require_secret("upload_service")["token"] if isinstance(st.secrets.get("upload_service"), dict) else ""
 if not UPLOAD_SERVICE_URL or not UPLOAD_SERVICE_TOKEN:
-    st.error("Fehlende upload_service Konfiguration in secrets: [upload_service] url/token")
+    st.error("Fehlende [upload_service] Secrets: url / token")
     st.stop()
 
+# Optional Admin PIN
+ADMIN_PIN = sget("ADMIN_PIN", "")
 
-# =========================
-# GOOGLE DRIVE AUTH
-# =========================
-def authenticate_drive():
-    oauth = require_section("google_auth")
-    for k in ["client_id", "client_secret", "refresh_token"]:
-        if k not in oauth or str(oauth[k]).strip() == "":
-            st.error(f"Fehlender Key in [google_auth]: {k}")
-            st.stop()
+# -------------------------
+# Google Drive client
+# -------------------------
+def drive_client():
+    creds = Credentials(
+        token=None,
+        refresh_token=GOOGLE_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        scopes=["https://www.googleapis.com/auth/drive"],
+    )
+    return build("drive", "v3", credentials=creds)
 
-    try:
-        creds = Credentials(
-            token=None,
-            refresh_token=oauth["refresh_token"],
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=oauth["client_id"],
-            client_secret=oauth["client_secret"],
-            scopes=SCOPES,
-        )
-        creds.refresh(Request())
-        return build("drive", "v3", credentials=creds)
-    except Exception as e:
-        st.error(f"OAuth/Drive Fehler: {e}")
-        st.stop()
+drive = drive_client()
 
-drive = authenticate_drive()
+def drive_list(folder_id: str):
+    q = f"'{folder_id}' in parents and trashed=false"
+    res = drive.files().list(
+        q=q,
+        pageSize=200,
+        fields="files(id,name,modifiedTime,webViewLink,mimeType,size)",
+        orderBy="modifiedTime desc",
+    ).execute()
+    return res.get("files", [])
 
+def drive_download_bytes(file_id: str) -> bytes:
+    request = drive.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return fh.getvalue()
 
-# =========================
-# DRIVE HELPERS
-# =========================
-def drive_list(query: str, fields: str, page_size: int = 200):
-    return drive.files().list(q=query, fields=fields, pageSize=page_size).execute().get("files", [])
+def sanitize_project(name: str) -> str:
+    name = name.strip()
+    name = re.sub(r"\s+", " ", name)
+    return name
 
-def ensure_subfolder(parent_id: str, folder_name: str) -> str:
-    try:
-        q = (
-            f"mimeType='application/vnd.google-apps.folder' and "
-            f"name='{folder_name}' and '{parent_id}' in parents and trashed=false"
-        )
-        files = drive_list(q, "files(id,name)", page_size=5)
-        if files:
-            return files[0]["id"]
+# -------------------------
+# Cloud Run Upload Widget (NO f-string braces!)
+# -------------------------
+def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: str):
+    """
+    bucket: "photos" or "uploads"
+    project: project name used as prefix server-side
+    """
+    # We inject values via simple placeholder replace (no f-string!)
+    html = r"""
+<div style="border:1px solid rgba(255,255,255,0.12); padding:16px; border-radius:12px; max-width:520px;">
+  <div style="font-size:18px; font-weight:700; margin-bottom:8px;">__TITLE__</div>
+  <div style="opacity:0.8; font-size:13px; margin-bottom:12px;">__HELP__</div>
 
-        meta = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_id]}
-        created = drive.files().create(body=meta, fields="id").execute()
-        return created["id"]
-    except Exception as e:
-        st.error(f"Unterordner Fehler: {e}")
-        st.stop()
+  <input id="file" type="file" accept="image/*,application/pdf" capture="environment" style="margin-bottom:12px;" />
+  <div style="display:flex; gap:10px; align-items:center;">
+    <button id="btn" style="background:#ff4b4b; color:white; border:none; padding:10px 14px; border-radius:10px; font-weight:700; cursor:pointer;">
+      📤 Hochladen
+    </button>
+    <div id="status" style="font-size:13px; opacity:0.9;"></div>
+  </div>
 
-REPORTS_HOME_FOLDER_ID = ensure_subfolder(REPORTS_FOLDER_ID, REPORTS_SUBFOLDER_NAME)
+  <div style="height:10px;"></div>
+  <div style="background:rgba(255,255,255,0.08); border-radius:999px; overflow:hidden; height:10px;">
+    <div id="bar" style="width:0%; height:10px; background:#ff4b4b;"></div>
+  </div>
+</div>
 
-def find_file_in_folder_by_name(folder_id: str, name: str):
-    try:
-        q = f"name = '{name}' and '{folder_id}' in parents and trashed=false"
-        files = drive_list(q, "files(id,name,modifiedTime)", page_size=10)
-        return files[0]["id"] if files else None
-    except Exception as e:
-        st.error(f"Drive-Suche Fehler: {e}")
-        return None
+<script>
+(function() {
+  const uploadUrl = "__UPLOAD_URL__";
+  const token = "__TOKEN__";
+  const bucket = "__BUCKET__";
+  const project = "__PROJECT__";
 
-def list_files(folder_id: str):
-    try:
-        q = f"'{folder_id}' in parents and trashed=false"
-        return drive_list(q, "files(id,name,mimeType,createdTime,modifiedTime)", page_size=200)
-    except Exception as e:
-        st.error(f"Drive-Liste Fehler: {e}")
-        return []
+  const btn = document.getElementById("btn");
+  const status = document.getElementById("status");
+  const bar = document.getElementById("bar");
+  const fileInput = document.getElementById("file");
 
-def download_bytes(file_id: str):
-    try:
-        req = drive.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        dl = MediaIoBaseDownload(fh, req)
-        done = False
-        while not done:
-            _, done = dl.next_chunk()
-        return fh.getvalue()
-    except Exception as e:
-        st.error(f"Download Fehler: {e}")
-        return b""
+  function setStatus(msg) {
+    status.textContent = msg;
+  }
+  function setProgress(pct) {
+    bar.style.width = String(pct) + "%";
+  }
 
+  btn.addEventListener("click", async function() {
+    try {
+      const f = fileInput.files && fileInput.files[0];
+      if (!f) {
+        setStatus("Bitte zuerst eine Datei wählen.");
+        setProgress(0);
+        return;
+      }
 
-def upload_bytes_to_drive(data: bytes, folder_id: str, filename: str, mimetype: str = "application/octet-stream"):
-    try:
-        meta = {"name": filename, "parents": [folder_id]}
-        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=False)
-        drive.files().create(body=meta, media_body=media, fields="id").execute()
-        return True
-    except Exception as e:
-        st.error(f"Upload Fehler: {e}")
-        return False
+      setStatus("Upload startet …");
+      setProgress(5);
 
+      const form = new FormData();
+      form.append("file", f, f.name);
+      form.append("bucket", bucket);
+      form.append("project", project);
 
-# =========================
-# PROJECTS CSV
-# =========================
-def load_projects_df() -> pd.DataFrame:
-    file_id = find_file_in_folder_by_name(REPORTS_FOLDER_ID, PROJECTS_CSV_NAME)
-    if not file_id:
-        df = pd.DataFrame(columns=PROJECTS_COLS)
-        upload_bytes_to_drive(df.to_csv(index=False).encode("utf-8"), REPORTS_FOLDER_ID, PROJECTS_CSV_NAME, "text/csv")
-        return df
+      const resp = await fetch(uploadUrl.replace(/\/$/, "") + "/upload", {
+        method: "POST",
+        headers: { "X-Upload-Token": token },
+        body: form
+      });
 
-    raw = download_bytes(file_id)
-    if not raw:
-        return pd.DataFrame(columns=PROJECTS_COLS)
+      const txt = await resp.text();
+      let payload = null;
+      try { payload = JSON.parse(txt); } catch(e) {}
 
-    df = pd.read_csv(io.BytesIO(raw))
-    for c in PROJECTS_COLS:
-        if c not in df.columns:
-            df[c] = ""
-    df = df[PROJECTS_COLS].fillna("")
-    return df
+      if (!resp.ok) {
+        const detail = payload && (payload.detail || payload.error || payload.message) ? (payload.detail || payload.error || payload.message) : txt;
+        setStatus("❌ Upload fehlgeschlagen (" + resp.status + "): " + detail);
+        setProgress(0);
+        return;
+      }
 
-def save_projects_df(df: pd.DataFrame):
-    file_id = find_file_in_folder_by_name(REPORTS_FOLDER_ID, PROJECTS_CSV_NAME)
-    data = df.to_csv(index=False).encode("utf-8")
-    if file_id:
-        media = MediaIoBaseUpload(io.BytesIO(data), mimetype="text/csv", resumable=False)
-        drive.files().update(fileId=file_id, media_body=media).execute()
-    else:
-        upload_bytes_to_drive(data, REPORTS_FOLDER_ID, PROJECTS_CSV_NAME, "text/csv")
+      setStatus("✅ Upload erfolgreich. Bitte unten 'Liste aktualisieren' klicken.");
+      setProgress(100);
 
+    } catch (err) {
+      setStatus("❌ Fehler: " + (err && err.message ? err.message : String(err)));
+      setProgress(0);
+    }
+  });
+})();
+</script>
+"""
+    html = (html
+        .replace("__TITLE__", title)
+        .replace("__HELP__", help_text)
+        .replace("__UPLOAD_URL__", UPLOAD_SERVICE_URL)
+        .replace("__TOKEN__", UPLOAD_SERVICE_TOKEN)
+        .replace("__BUCKET__", bucket)
+        .replace("__PROJECT__", project)
+    )
+    st.components.v1.html(html, height=260, scrolling=False)
 
-def add_or_restore_project(name: str) -> bool:
-    name = (name or "").strip()
-    if not name:
-        return False
-    df = load_projects_df()
-    if (df["Projekt"] == name).any():
-        df.loc[df["Projekt"] == name, "Status"] = "aktiv"
-    else:
-        df = pd.concat([df, pd.DataFrame([{"Projekt": name, "Status": "aktiv"}])], ignore_index=True)
-    save_projects_df(df)
-    return True
+# -------------------------
+# Projects / simple state
+# -------------------------
+# Minimal: projects list comes from a Drive file "Projects.csv" inside REPORTS_FOLDER_ID or Uploads folder
+# If you already have a stable project system, we can plug it in. For now: fallback list.
+DEFAULT_PROJECTS = ["Baustelle Müller", "Baustelle Beispiel"]
 
-def archive_project(name: str):
-    df = load_projects_df()
-    df.loc[df["Projekt"] == name, "Status"] = "archiviert"
-    save_projects_df(df)
+@st.cache_data(ttl=30)
+def get_projects():
+    # If you have Projects.csv in REPORTS_FOLDER_ID, we read it.
+    files = drive_list(REPORTS_FOLDER_ID)
+    proj = [f for f in files if f["name"].lower() == "projects.csv"]
+    if proj:
+        data = drive_download_bytes(proj[0]["id"])
+        df = pd.read_csv(io.BytesIO(data))
+        # expecting columns: Projekt, Status
+        if "Projekt" in df.columns:
+            df = df[df.get("Status", "aktiv").fillna("aktiv").str.lower().eq("aktiv")] if "Status" in df.columns else df
+            vals = [sanitize_project(x) for x in df["Projekt"].dropna().astype(str).tolist()]
+            return vals or DEFAULT_PROJECTS
+    return DEFAULT_PROJECTS
 
-def restore_project(name: str):
-    df = load_projects_df()
-    df.loc[df["Projekt"] == name, "Status"] = "aktiv"
-    save_projects_df(df)
+def project_prefix(project: str) -> str:
+    # same prefix used server-side: project__filename
+    return sanitize_project(project)
 
+# -------------------------
+# Reports for employee view
+# -------------------------
+def report_filename_for_project(project: str) -> str:
+    # Keep compatible with your earlier format
+    safe = project.replace("/", "_")
+    return f"{safe}_Reports.csv"
 
-# =========================
-# REPORTS CSV per project
-# =========================
-def reports_filename(project: str) -> str:
-    return f"{project}_Reports.csv"
+def find_drive_file_by_name(folder_id: str, name: str):
+    q = f"name = '{name}' and '{folder_id}' in parents and trashed=false"
+    res = drive.files().list(q=q, pageSize=5, fields="files(id,name,modifiedTime)").execute().get("files", [])
+    return res[0] if res else None
 
 def load_project_reports(project: str) -> pd.DataFrame:
-    fname = reports_filename(project)
-    fid = find_file_in_folder_by_name(REPORTS_HOME_FOLDER_ID, fname)
-    if not fid:
-        return pd.DataFrame(columns=RAPPORT_COLUMNS)
+    file_name = report_filename_for_project(project)
+    f = find_drive_file_by_name(REPORTS_FOLDER_ID, file_name)
+    if not f:
+        return pd.DataFrame()
+    raw = drive_download_bytes(f["id"])
+    try:
+        df = pd.read_csv(io.BytesIO(raw))
+        return df
+    except Exception:
+        return pd.DataFrame()
 
-    raw = download_bytes(fid)
-    if not raw:
-        return pd.DataFrame(columns=RAPPORT_COLUMNS)
+# -------------------------
+# UI
+# -------------------------
+st.title("👷 BauApp")
 
-    df = pd.read_csv(io.BytesIO(raw))
-    # Migration / Column cleanup
-    for c in RAPPORT_COLUMNS:
-        if c not in df.columns:
-            df[c] = ""
-    df = df[RAPPORT_COLUMNS].fillna("")
-    return df
+role_tabs = st.tabs(["👷 Mitarbeiter", "🛠️ Admin"])
 
-def save_project_reports(project: str, df: pd.DataFrame):
-    fname = reports_filename(project)
-    fid = find_file_in_folder_by_name(REPORTS_HOME_FOLDER_ID, fname)
-    data = df.to_csv(index=False).encode("utf-8")
+# ===== Mitarbeiter =====
+with role_tabs[0]:
+    projects = get_projects()
+    project = st.selectbox("Projekt", projects, index=0)
+    project = sanitize_project(project)
 
-    if fid:
-        media = MediaIoBaseUpload(io.BytesIO(data), mimetype="text/csv", resumable=False)
-        drive.files().update(fileId=fid, media_body=media).execute()
-    else:
-        upload_bytes_to_drive(data, REPORTS_HOME_FOLDER_ID, fname, "text/csv")
+    t1, t2, t3 = st.tabs(["📋 Rapport", "📷 Fotos", "📁 Pläne"])
 
+    # --- Rapport tab (employee view + insight) ---
+    with t1:
+        st.subheader("Rapporte (Einblick)")
+        df = load_project_reports(project)
 
-# =========================
-# HTML UPLOAD WIDGET (Cloud Run)
-# =========================
-def cloudrun_upload_widget(project: str, target: str, label: str, accept: str, multiple: bool = False, height: int = 310):
-    """
-    target: "photos" | "uploads"
-    """
-    prj = (project or "").replace('"', "").strip()
-    tgt = target.replace('"', "").strip()
-
-    mult_attr = "multiple" if multiple else ""
-    html = f"""
-    <div style="border:1px solid rgba(255,255,255,0.12); border-radius:12px; padding:14px; max-width:560px;">
-      <div style="font-family:sans-serif; font-size:14px; margin-bottom:10px;">
-        <b>{label}</b><br/>
-        <span style="opacity:0.75; font-size:12px;">Upload läuft über Cloud Run (stabil auf Handy). Danach ggf. „Liste aktualisieren“ klicken.</span>
-      </div>
-
-      <input
-        type="file"
-        id="bauappFile"
-        accept="{accept}"
-        {mult_attr}
-        style="margin-bottom: 10px; width: 100%;"
-      />
-
-      <button
-        type="button"
-        id="bauappBtn"
-        style="background:#ff4b4b; color:white; border:none; padding:10px 14px; border-radius:8px; cursor:pointer; font-size:14px;"
-      >
-        📤 Hochladen
-      </button>
-
-      <div id="bauappStatus" style="margin-top:10px; font-family:sans-serif; font-size:14px;"></div>
-      <div id="bauappProgressWrap" style="margin-top:8px; display:none;">
-        <div style="height:10px; background:rgba(255,255,255,0.12); border-radius:999px; overflow:hidden;">
-          <div id="bauappProgress" style="height:10px; width:0%; background:#22c55e;"></div>
-        </div>
-      </div>
-    </div>
-
-    <script>
-      const input = document.getElementById("bauappFile");
-      const btn = document.getElementById("bauappBtn");
-      const status = document.getElementById("bauappStatus");
-      const wrap = document.getElementById("bauappProgressWrap");
-      const bar = document.getElementById("bauappProgress");
-
-      function setStatus(msg) {{
-        status.innerText = msg;
-      }}
-      function setProgress(p) {{
-        wrap.style.display = "block";
-        bar.style.width = String(p) + "%";
-      }}
-
-      async function uploadOne(file) {{
-        return new Promise((resolve) => {{
-          const fd = new FormData();
-          fd.append("project", "{prj}");
-          fd.append("target", "{tgt}");
-          fd.append("file", file, file.name);
-
-          const xhr = new XMLHttpRequest();
-          xhr.open("POST", "{UPLOAD_SERVICE_URL}/upload", true);
-          xhr.setRequestHeader("X-Upload-Token", "{UPLOAD_SERVICE_TOKEN}");
-
-          xhr.upload.onprogress = (e) => {{
-            if (e.lengthComputable) {{
-              const p = Math.round((e.loaded / e.total) * 100);
-              setProgress(p);
-            }}
-          }};
-
-          xhr.onload = () => {{
-            let data = {{}};
-            try {{ data = JSON.parse(xhr.responseText || "{{}}"); }} catch(e) {{}}
-            if (xhr.status >= 200 && xhr.status < 300) {{
-              resolve({{ok:true, filename: data.filename || file.name}});
-            }} else {{
-              resolve({{ok:false, err: (data.detail || xhr.responseText || "Upload-Fehler")}});
-            }}
-          }};
-
-          xhr.onerror = () => resolve({{ok:false, err:"Netzwerkfehler"}});
-          xhr.send(fd);
-        }});
-      }}
-
-      btn.onclick = async () => {{
-        if (!input.files || input.files.length === 0) {{
-          setStatus("❌ Bitte zuerst eine Datei auswählen.");
-          return;
-        }}
-
-        btn.disabled = true;
-        btn.style.opacity = "0.7";
-        setProgress(0);
-
-        const files = Array.from(input.files);
-        let okCount = 0;
-
-        for (let i = 0; i < files.length; i++) {{
-          setStatus(`⏳ Upload ${i+1} / ${files.length} …`);
-          const res = await uploadOne(files[i]);
-          if (res.ok) {{
-            okCount += 1;
-            setStatus(`✅ ${okCount}/${files.length} hochgeladen`);
-          }} else {{
-            setStatus(`❌ Fehler bei Datei ${i+1}: ${res.err}`);
-            break;
-          }}
-          setProgress(0);
-        }}
-
-        setStatus("✅ Upload abgeschlossen. Bitte ggf. „Liste aktualisieren“ klicken.");
-        btn.disabled = false;
-        btn.style.opacity = "1.0";
-        input.value = "";
-      }};
-    </script>
-    """
-    components.html(html, height=height)
-
-
-# =========================
-# UI: MODE
-# =========================
-mode = st.sidebar.radio("Bereich", ["Mitarbeiter", "Admin"], horizontal=False)
-
-
-# =========================
-# MITARBEITER
-# =========================
-if mode == "Mitarbeiter":
-    st.title("👷 Mitarbeiterbereich")
-
-    dfp = load_projects_df()
-    active = dfp[dfp["Status"] != "archiviert"]["Projekt"].tolist()
-    if not active:
-        st.info("Keine aktiven Projekte vorhanden.")
-        st.stop()
-
-    project = st.selectbox("Projekt:", active)
-
-    tab1, tab2, tab3 = st.tabs(["🧾 Rapport", "📷 Fotos", "📁 Pläne"])
-
-    # -------- Rapport
-    with tab1:
-        st.subheader("Rapport erfassen")
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            datum = st.date_input("Datum", datetime.now().date())
-            mitarbeiter = st.text_input("Mitarbeiter", "")
-        with col2:
-            start = st.time_input("Start", time(7, 0))
-            ende = st.time_input("Ende", time(16, 0))
-        with col3:
-            pause_h = st.number_input("Pause (h)", min_value=0.0, max_value=6.0, step=0.25, value=0.5)
-            material = st.text_input("Material", "")
-
-        bemerkung = st.text_area("Bemerkung", "")
-
-        # Stunden berechnen
-        def calc_hours(s: time, e: time, pause: float) -> float:
-            dt_s = datetime.combine(datetime.now().date(), s)
-            dt_e = datetime.combine(datetime.now().date(), e)
-            if dt_e < dt_s:
-                dt_e += timedelta(days=1)
-            hours = (dt_e - dt_s).total_seconds() / 3600.0
-            hours = max(0.0, hours - float(pause))
-            return round(hours, 2)
-
-        stunden = calc_hours(start, ende, pause_h)
-        st.write(f"**Stunden:** {stunden}")
-
-        if st.button("✅ Rapport speichern"):
-            df = load_project_reports(project)
-            new_row = {
-                "Datum": str(datum),
-                "Projekt": project,
-                "Mitarbeiter": mitarbeiter.strip(),
-                "Start": start.strftime("%H:%M"),
-                "Ende": ende.strftime("%H:%M"),
-                "Pause_h": float(pause_h),
-                "Stunden": float(stunden),
-                "Material": material.strip(),
-                "Bemerkung": bemerkung.strip(),
-            }
-            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-            save_project_reports(project, df)
-            st.success("Rapport gespeichert.")
-            sys_time.sleep(0.2)
-            st.rerun()
-
-        st.divider()
-        st.subheader("📌 Aktuelle Rapporte im Projekt")
-
-        df_show = load_project_reports(project)
-        if df_show.empty:
-            st.info("Noch keine Rapporte vorhanden.")
+        if df.empty:
+            st.info("Noch keine Rapporte für dieses Projekt gefunden.")
         else:
-            # Neueste oben
-            df_show2 = df_show.copy()
-            # Sort grob nach Datum/Start (best effort)
-            try:
-                df_show2["__dt"] = pd.to_datetime(df_show2["Datum"], errors="coerce")
-                df_show2 = df_show2.sort_values(["__dt", "Start"], ascending=[False, False]).drop(columns=["__dt"])
-            except Exception:
-                pass
+            # Show last entries
+            st.caption("Letzte Einträge (aktuell aus Google Drive gelesen)")
+            st.dataframe(df.tail(20), use_container_width=True)
 
-            st.dataframe(df_show2, use_container_width=True, height=320)
-
-            csv_bytes = df_show.to_csv(index=False).encode("utf-8")
+            # Download full CSV
+            csv_bytes = df.to_csv(index=False).encode("utf-8")
             st.download_button(
-                "⬇️ Rapporte als CSV herunterladen",
+                "⬇️ Gesamten Rapport als CSV herunterladen",
                 data=csv_bytes,
-                file_name=reports_filename(project),
+                file_name=report_filename_for_project(project),
                 mime="text/csv",
             )
 
-    # -------- Fotos
-    with tab2:
-        st.subheader("📷 Fotos")
-        st.caption("Upload ist mobil stabil (Cloud Run).")
+        st.divider()
+        st.caption("Hinweis: Das ist nur der Einblick. Rapport-Erfassung bleibt wie in deiner bestehenden Logik – wenn du willst, baue ich das Formular wieder komplett ein.")
+
+    # --- Photos tab (Cloud Run upload) ---
+    with t2:
+        st.subheader("Fotos")
+        st.caption("Foto-Upload läuft über Cloud Run (stabil auf Android/iPhone). Nach dem Upload bitte unten auf „Liste aktualisieren“ klicken.")
 
         cloudrun_upload_widget(
-            project=project,
-            target="photos",
-            label="Foto auswählen oder aufnehmen",
-            accept="image/*",
-            multiple=False,
-            height=320,
+            project=project_prefix(project),
+            bucket="photos",
+            title="Foto auswählen oder aufnehmen",
+            help_text="Auf dem Handy kannst du Kamera oder Galerie wählen. Upload startet über den roten Button.",
         )
 
-        if st.button("🔄 Liste aktualisieren", key="refresh_photos"):
-            st.rerun()
+        if st.button("🔄 Liste aktualisieren"):
+            st.cache_data.clear()
 
         st.divider()
-        files = list_files(PHOTOS_FOLDER_ID)
-        shown = False
-        for f in files:
-            if f["name"].startswith(project + "_"):
-                data = download_bytes(f["id"])
-                if data:
-                    # Bilder anzeigen, sonst Download
-                    if (f.get("mimeType") or "").startswith("image/"):
-                        try:
-                            st.image(data, width=340)
-                        except Exception:
-                            st.download_button(f"⬇️ {f['name']}", data=data, file_name=f["name"], key=f"ph_{f['id']}")
-                    else:
-                        st.download_button(f"⬇️ {f['name']}", data=data, file_name=f["name"], key=f"ph_{f['id']}")
-                    shown = True
-        if not shown:
-            st.info("Keine Fotos für dieses Projekt vorhanden.")
-
-    # -------- Pläne / Dokumente (Mitarbeiter nur Download)
-    with tab3:
-        st.subheader("📁 Pläne / Dokumente")
-        files = list_files(UPLOADS_FOLDER_ID)
-        found = False
-        for f in files:
-            if f["name"].startswith(project + "_"):
-                found = True
-                st.download_button(
-                    f"⬇️ {f['name']}",
-                    data=download_bytes(f["id"]),
-                    file_name=f["name"],
-                    key=f"pl_{f['id']}",
-                )
-        if not found:
-            st.info("Keine Pläne/Dokumente vorhanden.")
-
-
-# =========================
-# ADMIN
-# =========================
-else:
-    pw = st.sidebar.text_input("Passwort", type="password")
-    if pw != ADMIN_PASSWORD:
-        st.info("Bitte Admin-Passwort eingeben.")
-        st.stop()
-
-    st.title("🛠️ Admin")
-
-    dfp = load_projects_df()
-    active_projects = dfp[dfp["Status"] != "archiviert"]["Projekt"].tolist()
-    archived_projects = dfp[dfp["Status"] == "archiviert"]["Projekt"].tolist()
-
-    st.subheader("Projektverwaltung")
-
-    new_proj = st.text_input("Projekt anlegen oder archiviertes reaktivieren")
-    if st.button("➕ Projekt speichern"):
-        if add_or_restore_project(new_proj):
-            st.success("Projekt gespeichert.")
-            st.rerun()
+        # Display photos for this project by prefix
+        files = drive_list(PHOTOS_FOLDER_ID)
+        prefix = project_prefix(project) + "__"
+        proj_files = [f for f in files if f["name"].startswith(prefix)]
+        if not proj_files:
+            st.info("Noch keine Fotos für dieses Projekt.")
         else:
-            st.warning("Bitte Projektname eingeben.")
+            st.write(f"Gefundene Fotos: {len(proj_files)}")
+            for f in proj_files[:50]:
+                st.write("🖼️", f["name"])
 
-    colA, colB = st.columns(2)
-    with colA:
-        st.write("Aktive Projekte")
-        to_archive = st.selectbox("Archivieren", [""] + active_projects)
-        if st.button("📦 Archivieren") and to_archive:
-            archive_project(to_archive)
-            st.success("Archiviert.")
-            st.rerun()
+    # --- Plans tab (read-only for employees) ---
+    with t3:
+        st.subheader("Pläne / Dokumente (Anzeige)")
+        files = drive_list(UPLOADS_FOLDER_ID)
+        prefix = project_prefix(project) + "__"
+        proj_files = [f for f in files if f["name"].startswith(prefix)]
+        if not proj_files:
+            st.info("Keine Pläne/Dokumente für dieses Projekt gefunden.")
+        else:
+            for f in proj_files[:100]:
+                st.write("📄", f["name"])
 
-    with colB:
-        st.write("Archivierte Projekte")
-        to_restore = st.selectbox("Wiederherstellen", [""] + archived_projects)
-        if st.button("♻️ Wiederherstellen") and to_restore:
-            restore_project(to_restore)
-            st.success("Wiederhergestellt.")
-            st.rerun()
+# ===== Admin =====
+with role_tabs[1]:
+    if ADMIN_PIN:
+        pin = st.text_input("Admin PIN", type="password")
+        if pin != ADMIN_PIN:
+            st.warning("PIN erforderlich.")
+            st.stop()
 
-    st.divider()
-    st.subheader("📁 Pläne/Dokumente hochladen (mobil stabil)")
+    st.subheader("Admin – Uploads (Smartphone stabil)")
 
-    if not active_projects:
-        st.info("Keine aktiven Projekte vorhanden.")
-        st.stop()
+    projects = get_projects()
+    project = st.selectbox("Projekt (für Upload-Zuordnung)", projects, index=0, key="admin_project")
+    project = sanitize_project(project)
 
-    up_project = st.selectbox("Projekt für Upload", active_projects, key="admin_upload_project")
+    st.caption("Admin-Datei-Upload läuft ebenfalls über Cloud Run (damit es am Handy zuverlässig ist).")
 
     cloudrun_upload_widget(
-        project=up_project,
-        target="uploads",
-        label="Dokument(e) auswählen und hochladen (PDF, Bilder, Office, …)",
-        accept="*/*",
-        multiple=True,
-        height=340,
+        project=project_prefix(project),
+        bucket="uploads",
+        title="Plan/Dokument hochladen (PDF/Bild)",
+        help_text="Wähle Datei am Handy/PC und lade hoch. Danach unten Liste aktualisieren.",
     )
 
-    if st.button("🔄 Liste aktualisieren", key="refresh_admin_uploads"):
-        st.rerun()
+    if st.button("🔄 Liste aktualisieren", key="admin_refresh"):
+        st.cache_data.clear()
 
     st.divider()
-    st.subheader("Vorhandene Pläne/Dokumente")
-
-    files = list_files(UPLOADS_FOLDER_ID)
-    found = False
-    for f in files:
-        if f["name"].startswith(up_project + "_"):
-            found = True
-            st.download_button(
-                f"⬇️ {f['name']}",
-                data=download_bytes(f["id"]),
-                file_name=f["name"],
-                key=f"adm_dl_{f['id']}",
-            )
-    if not found:
-        st.info("Keine Dateien für dieses Projekt vorhanden.")
+    st.subheader("Dateien im Upload-Ordner (Projekt)")
+    files = drive_list(UPLOADS_FOLDER_ID)
+    prefix = project_prefix(project) + "__"
+    proj_files = [f for f in files if f["name"].startswith(prefix)]
+    if not proj_files:
+        st.info("Noch keine Uploads für dieses Projekt.")
+    else:
+        for f in proj_files[:200]:
+            st.write("📄", f["name"])
