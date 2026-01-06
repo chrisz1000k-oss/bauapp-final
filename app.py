@@ -606,54 +606,60 @@ if st.button("⬆️ Dokumente direkt hochladen", key="admin_docs_direct_btn"):
         st.rerun()
         st.divider()
 
-        # Fotos Vorschau (lesbar)
-        c1, c2 = st.columns([0.7, 0.3])
-        c1.subheader("📷 Fotos – Vorschau")
-        if c2.button("🔄 Aktualisieren", key="admin_refresh_photos"):
-            st.rerun()
+        # Übersicht pro Projekt (wie im Mitarbeiterbereich)
+        tabF, tabD = st.tabs(["📷 Fotos – Übersicht", "📄 Pläne/Dokumente – Übersicht"])
 
-        files_ph = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
-        admin_photos = [x for x in files_ph if x["name"].startswith(sel_p + "_")][:60]
+        # -------- Fotos --------
+        with tabF:
+            c1, c2 = st.columns([0.7, 0.3])
+            c1.subheader("📷 Fotos – Vorschau")
+            if c2.button("🔄 Aktualisieren", key="admin_refresh_photos"):
+                st.rerun()
 
-        if not admin_photos:
-            st.info("Keine Fotos vorhanden.")
-        else:
-            for f in admin_photos:
-                with st.expander(f"🖼️ {f['name']}", expanded=False):
-                    image_preview_from_drive(f["name"], f.get("mimeType"), f["id"])
-                    # Admin darf löschen
-                    if st.button("🗑 Foto löschen", key=f"adm_del_photo_{f['id']}"):
+            files_ph = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
+            admin_photos = [x for x in files_ph if x["name"].startswith(sel_p + "_")][:120]
+
+            if not admin_photos:
+                st.info("Keine Fotos vorhanden.")
+            else:
+                # kleine Galerie (3 Spalten)
+                cols = st.columns(3)
+                for idx, f in enumerate(admin_photos):
+                    col = cols[idx % 3]
+                    with col:
+                        with st.expander(f"🖼️ {f['name']}", expanded=False):
+                            image_preview_from_drive(f["name"], f.get("mimeType"), f["id"])
+                            if st.button("🗑 Foto löschen", key=f"adm_del_photo_{f['id']}"):
+                                delete_file(f["id"])
+                                st.success("Gelöscht.")
+                                sys_time.sleep(0.2)
+                                st.rerun()
+
+        # -------- Dokumente --------
+        with tabD:
+            c1, c2 = st.columns([0.7, 0.3])
+            c1.subheader("📄 Pläne/Dokumente – Download")
+            if c2.button("🔄 Aktualisieren", key="admin_refresh_docs"):
+                st.rerun()
+
+            files_docs = list_files(UPLOADS_FOLDER_ID)
+            admin_docs = [x for x in files_docs if x["name"].startswith(sel_p + "_")][:200]
+
+            if not admin_docs:
+                st.info("Keine Dokumente vorhanden.")
+            else:
+                for f in admin_docs:
+                    d = download_bytes(f["id"])
+                    if not d:
+                        continue
+                    a1, a2, a3 = st.columns([0.65, 0.2, 0.15])
+                    a1.write(f"📄 {f['name']}")
+                    a2.download_button("⬇️ Download", d, file_name=f["name"])
+                    if a3.button("🗑", key=f"adm_del_doc_{f['id']}"):
                         delete_file(f["id"])
                         st.success("Gelöscht.")
                         sys_time.sleep(0.2)
                         st.rerun()
-
-        st.divider()
-
-        # Dokumente Download-Liste + Löschen
-        c1, c2 = st.columns([0.7, 0.3])
-        c1.subheader("📄 Pläne/Dokumente – Download")
-        if c2.button("🔄 Aktualisieren", key="admin_refresh_docs"):
-            st.rerun()
-
-        files_docs = list_files(UPLOADS_FOLDER_ID)
-        admin_docs = [x for x in files_docs if x["name"].startswith(sel_p + "_")][:150]
-
-        if not admin_docs:
-            st.info("Keine Dokumente vorhanden.")
-        else:
-            for f in admin_docs:
-                d = download_bytes(f["id"])
-                if not d:
-                    continue
-                a1, a2, a3 = st.columns([0.65, 0.2, 0.15])
-                a1.write(f"📄 {f['name']}")
-                a2.download_button("⬇️ Download", d, file_name=f["name"])
-                if a3.button("🗑", key=f"adm_del_doc_{f['id']}"):
-                    delete_file(f["id"])
-                    st.success("Gelöscht.")
-                    sys_time.sleep(0.2)
-                    st.rerun()
 
     # --- Rapporte ---
     with tabC:
