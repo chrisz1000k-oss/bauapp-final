@@ -291,4 +291,387 @@ def cloudrun_upload_widget(
             if (resp.ok) {
               success++;
               if (debug) {
-                status.innerText = "✅ OK:
+                status.innerText = "✅ OK: " + file.name + "\n" + text;
+              }
+            } else {
+              errors++;
+              status.innerText = "❌ Fehler: " + file.name + "\nHTTP " + resp.status + "\n" + text;
+            }
+          } catch(e) {
+            errors++;
+            status.innerText = "❌ Fehler: " + file.name + "\n" + e;
+          }
+        }
+
+        btn.disabled = false;
+        btn.style.opacity = "1.0";
+        input.value = "";
+
+        if (!debug) {
+          if (errors === 0) {
+            status.innerHTML = "<span style='color:green; font-weight:bold'>✅ " + success + " Datei(en) erfolgreich!</span>";
+          } else {
+            status.innerHTML = "<span style='color:red'>⚠️ " + success + " erfolgreich, " + errors + " fehlgeschlagen.</span>";
+          }
+        }
+      };
+    })();
+    </script>
+    """
+
+    html = (html
+        .replace("__TITLE__", title)
+        .replace("__HELP__", help_text)
+        .replace("__URL__", UPLOAD_SERVICE_URL)
+        .replace("__TOKEN__", UPLOAD_SERVICE_TOKEN)
+        .replace("__BUCKET__", bucket)
+        .replace("__PROJECT__", project)
+        .replace("__ACCEPT__", accept)
+        .replace("__UID__", uid)
+        .replace("__MULT__", "multiple" if multiple else "")
+        .replace("__DEBUG__", dbg)
+    )
+
+    components.html(html, height=height)
+
+# =========================
+# SAFE IMAGE PREVIEW
+# =========================
+def image_preview_from_drive(file_name: str, mime: str | None, file_id: str):
+    data = download_bytes(file_id)
+    if not data:
+        st.warning("Konnte Bild nicht laden.")
+        return
+
+    try:
+        st.image(data, use_container_width=True)
+    except Exception:
+        st.warning("Bild konnte nicht angezeigt werden (Format/Upload defekt).")
+
+# =========================
+# UI
+# =========================
+st.sidebar.title("Menü")
+mode = st.sidebar.radio("Bereich", ["👷 Mitarbeiter", "🛠️ Admin"])
+
+# -------------------------
+# 👷 MITARBEITER
+# -------------------------
+if mode == "👷 Mitarbeiter":
+    st.title("👷 Mitarbeiterbereich")
+
+    active_projects = get_active_projects()
+    if not active_projects:
+        st.warning("Keine aktiven Projekte.")
+        st.stop()
+
+    project = st.selectbox("Projekt wählen", active_projects)
+    t1, t2, t3 = st.tabs(["📝 Rapport", "📷 Fotos", "📂 Pläne"])
+
+    # --- RAPPORT ---
+    with t1:
+        st.subheader("Rapport erfassen")
+        c1, c2, c3 = st.columns(3)
+
+        date_val = c1.date_input("Datum", datetime.now())
+        ma_val = c1.text_input("Name")
+        start_val = c2.time_input("Start", time(7, 0))
+        end_val = c2.time_input("Ende", time(16, 0))
+        pause_val = c3.number_input("Pause (h)", 0.0, 5.0, 0.5, 0.25)
+        mat_val = c3.text_input("Material")
+        rem_val = st.text_area("Bemerkung")
+
+        dt_start = datetime.combine(datetime.today(), start_val)
+        dt_end = datetime.combine(datetime.today(), end_val)
+        if dt_end < dt_start:
+            dt_end += timedelta(days=1)
+
+        dur = round(max(0.0, (dt_end - dt_start).total_seconds() / 3600 - pause_val), 2)
+        st.info(f"Stunden: {dur}")
+
+        if st.button("✅ Speichern", type="primary"):
+            if not ma_val.strip():
+                st.error("Name fehlt.")
+            else:
+                ok = save_report(project, {
+                    "Datum": str(date_val),
+                    "Projekt": project,
+                    "Mitarbeiter": ma_val.strip(),
+                    "Start": str(start_val),
+                    "Ende": str(end_val),
+                    "Pause_h": pause_val,
+                    "Stunden": dur,
+                    "Material": mat_val,
+                    "Bemerkung": rem_val
+                })
+                if ok:
+                    st.success("Gespeichert!")
+                    sys_time.sleep(0.4)
+                    st.rerun()
+                else:
+                    st.error("Speichern fehlgeschlagen (Drive). Bitte erneut versuchen.")
+
+        st.divider()
+
+        cA, cB = st.columns([0.7, 0.3])
+        cA.subheader("📌 Rapporte im Projekt (aktuell)")
+        if cB.button("🔄 Bericht aktualisieren", key="refresh_reports_emp"):
+            st.rerun()
+
+        df_h, _ = get_reports_df(project)
+        if df_h.empty:
+            st.info("Noch keine Rapporte für dieses Projekt vorhanden.")
+        else:
+            try:
+                df_view = df_h.copy()
+                df_view["Datum"] = pd.to_datetime(df_view["Datum"], errors="coerce")
+                df_view = df_view.sort_values(["Datum"], ascending=False)
+            except Exception:
+                df_view = df_h
+            st.dataframe(df_view.tail(50), use_container_width=True)
+
+    # --- FOTOS (LESBAR) ---
+    with t2:
+        st.subheader("Fotos")
+
+        cloudrun_upload_widget(
+            project=project,
+            bucket="photos",
+            title="Foto(s) hochladen",
+            help_text="Nur Bilder (Kamera/Galerie).",
+            accept="image/*",
+            multiple=True,
+            height=240,
+            debug=False,
+        )
+
+        if st.button("🔄 Fotos aktualisieren", key="refresh_photos_emp"):
+            st.rerun()
+
+        files = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
+        proj_photos = [x for x in files if x["name"].startswith(project + "_")][:40]
+
+        if not proj_photos:
+            st.info("Keine Fotos vorhanden.")
+        else:
+            for f in proj_photos:
+                with st.expander(f"🖼️ {f['name']}", expanded=False):
+                    image_preview_from_drive(f["name"], f.get("mimeType"), f["id"])
+
+    # --- PLÄNE / DOKUMENTE (DOWNLOAD OK) ---
+    with t3:
+        st.subheader("Pläne & Dokumente")
+
+        if st.button("🔄 Pläne aktualisieren", key="refresh_docs_emp"):
+            st.rerun()
+
+        files = list_files(UPLOADS_FOLDER_ID)
+        proj_docs = [x for x in files if x["name"].startswith(project + "_")][:100]
+
+        if not proj_docs:
+            st.info("Keine Dokumente hinterlegt.")
+        else:
+            for f in proj_docs:
+                d = download_bytes(f["id"])
+                if not d:
+                    continue
+                c1, c2 = st.columns([0.8, 0.2])
+                c1.write(f"📄 {f['name']}")
+                c2.download_button("⬇️", d, file_name=f["name"])
+
+# -------------------------
+# 🛠️ ADMIN
+# -------------------------
+elif mode == "🛠️ Admin":
+    st.title("Admin")
+
+    pin = st.text_input("PIN", type="password")
+    if pin != ADMIN_PIN:
+        st.stop()
+
+    st.success("Angemeldet")
+
+    tabA, tabB, tabC = st.tabs(["📌 Projekte", "📂 Uploads & Vorschau", "🧾 Rapporte"])
+
+    # --- Projekte ---
+    with tabA:
+        st.subheader("Projekte verwalten")
+        df_p, pid = get_projects_df()
+
+        c1, c2 = st.columns([0.7, 0.3])
+        new_p = c1.text_input("Neues Projekt")
+        if c2.button("➕ Anlegen") and new_p.strip():
+            df_p = pd.concat([df_p, pd.DataFrame([{"Projekt": new_p.strip(), "Status": "aktiv"}])], ignore_index=True)
+            save_projects_df(df_p, pid)
+            st.success("Projekt angelegt.")
+            st.rerun()
+
+        if df_p.empty:
+            st.info("Noch keine Projekte.")
+        else:
+            st.dataframe(df_p, use_container_width=True)
+
+            st.divider()
+            st.subheader("Projekt Status ändern")
+            all_projs = df_p["Projekt"].tolist()
+            sel = st.selectbox("Projekt wählen", all_projs, key="admin_status_proj")
+            new_status = st.radio("Neuer Status", ["aktiv", "archiviert"], horizontal=True, key="admin_status_radio")
+            if st.button("Status speichern", key="admin_save_status"):
+                df_p.loc[df_p["Projekt"] == sel, "Status"] = new_status
+                save_projects_df(df_p, pid)
+                st.success("Status geändert.")
+                st.rerun()
+
+    # --- Uploads & Vorschau ---
+    with tabB:
+        st.subheader("Uploads (mobil + PC)")
+
+        projs = get_active_projects()
+        if not projs:
+            st.info("Erstelle zuerst ein aktives Projekt.")
+            st.stop()
+
+        sel_p = st.selectbox("Projekt", projs, key="admin_sel_project_upload")
+
+        cX, cY = st.columns(2)
+
+        with cX:
+            st.markdown("### 📷 Fotos (Upload)")
+            cloudrun_upload_widget(
+                project=sel_p,
+                bucket="photos",
+                title="Foto(s) hochladen",
+                help_text="Nur Bilder (Kamera/Galerie).",
+                accept="image/*",
+                multiple=True,
+                height=240,
+                debug=False,
+            )
+
+        with cY:
+            st.markdown("### 📄 Pläne/Dokumente (Upload)")
+            # Cloud-Run Upload (wie bisher)
+            cloudrun_upload_widget(
+                project=sel_p,
+                bucket="uploads",
+                title="Dokument(e) hochladen",
+                help_text="PDF/Bilder (Upload Service).",
+                accept="application/pdf,image/*",
+                multiple=True,
+                height=240,
+                debug=True,  # DEBUG AN: du siehst Serverantwort im Widget
+            )
+
+            # PC-Fallback: direkt nach Drive (damit du testen kannst, auch wenn Backend falsch routet)
+            st.caption("💻 PC-Fallback: Dokumente direkt in Google Drive (Uploads-Ordner)")
+            docs = st.file_uploader(
+                "Dokumente auswählen (PDF/JPG/PNG)",
+                type=["pdf", "jpg", "jpeg", "png", "webp"],
+                accept_multiple_files=True,
+                key="admin_docs_direct",
+            )
+
+            if st.button("⬆️ Dokumente direkt hochladen", key="admin_docs_direct_btn"):
+                if not docs:
+                    st.warning("Bitte zuerst Dateien auswählen.")
+                else:
+                    ok_count, fail_count = 0, 0
+                    for f in docs:
+                        data = f.getvalue()
+                        mime = getattr(f, "type", None) or "application/octet-stream"
+                        name = make_prefixed_filename(sel_p, f.name)
+
+                        if upload_bytes_to_drive(data, UPLOADS_FOLDER_ID, name, mime):
+                            ok_count += 1
+                        else:
+                            fail_count += 1
+
+                    if fail_count == 0:
+                        st.success(f"✅ {ok_count} Dokument(e) direkt hochgeladen.")
+                    else:
+                        st.warning(f"⚠️ {ok_count} ok, {fail_count} fehlgeschlagen.")
+
+                    sys_time.sleep(0.3)
+                    st.rerun()
+
+        st.divider()
+
+        # Fotos Vorschau (lesbar)
+        c1, c2 = st.columns([0.7, 0.3])
+        c1.subheader("📷 Fotos – Vorschau")
+        if c2.button("🔄 Aktualisieren", key="admin_refresh_photos"):
+            st.rerun()
+
+        files_ph = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
+        admin_photos = [x for x in files_ph if x["name"].startswith(sel_p + "_")][:60]
+
+        if not admin_photos:
+            st.info("Keine Fotos vorhanden.")
+        else:
+            for f in admin_photos:
+                with st.expander(f"🖼️ {f['name']}", expanded=False):
+                    image_preview_from_drive(f["name"], f.get("mimeType"), f["id"])
+                    if st.button("🗑 Foto löschen", key=f"adm_del_photo_{f['id']}"):
+                        delete_file(f["id"])
+                        st.success("Gelöscht.")
+                        sys_time.sleep(0.2)
+                        st.rerun()
+
+        st.divider()
+
+        # Dokumente Download-Liste + Löschen
+        c1, c2 = st.columns([0.7, 0.3])
+        c1.subheader("📄 Pläne/Dokumente – Download")
+        if c2.button("🔄 Aktualisieren", key="admin_refresh_docs"):
+            st.rerun()
+
+        files_docs = list_files(UPLOADS_FOLDER_ID)
+        admin_docs = [x for x in files_docs if x["name"].startswith(sel_p + "_")][:150]
+
+        if not admin_docs:
+            st.info("Keine Dokumente vorhanden.")
+        else:
+            for f in admin_docs:
+                d = download_bytes(f["id"])
+                if not d:
+                    continue
+                a1, a2, a3 = st.columns([0.65, 0.2, 0.15])
+                a1.write(f"📄 {f['name']}")
+                a2.download_button("⬇️ Download", d, file_name=f["name"])
+                if a3.button("🗑", key=f"adm_del_doc_{f['id']}"):
+                    delete_file(f["id"])
+                    st.success("Gelöscht.")
+                    sys_time.sleep(0.2)
+                    st.rerun()
+
+    # --- Rapporte ---
+    with tabC:
+        st.subheader("Rapporte ansehen")
+
+        projs = get_active_projects()
+        if not projs:
+            st.info("Keine aktiven Projekte.")
+            st.stop()
+
+        sel_rp = st.selectbox("Projekt", projs, key="admin_sel_reports")
+        if st.button("🔄 Rapporte aktualisieren", key="admin_refresh_reports"):
+            st.rerun()
+
+        df_r, _ = get_reports_df(sel_rp)
+        if df_r.empty:
+            st.info("Keine Rapporte vorhanden.")
+        else:
+            try:
+                df_view = df_r.copy()
+                df_view["Datum"] = pd.to_datetime(df_view["Datum"], errors="coerce")
+                df_view = df_view.sort_values(["Datum"], ascending=False)
+            except Exception:
+                df_view = df_r
+
+            st.dataframe(df_view, use_container_width=True)
+            st.download_button(
+                "⬇️ Rapporte als CSV herunterladen",
+                df_view.to_csv(index=False).encode("utf-8"),
+                file_name=f"{sel_rp}_Reports.csv",
+                mime="text/csv",
+            )
