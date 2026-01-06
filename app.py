@@ -153,11 +153,6 @@ def delete_file(file_id: str):
         st.error(f"Löschen Fehler: {e}")
         return False
 
-def make_prefixed_filename(project: str, original_name: str) -> str:
-    """Damit deine startswith(project + '_')-Filter immer greifen."""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{project}_{ts}_{original_name}"
-
 # =========================
 # PROJECTS + REPORTS
 # =========================
@@ -206,27 +201,22 @@ def save_report(project_name: str, row_dict: dict) -> bool:
         return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
     return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, f"{project_name}_Reports.csv", "text/csv")
 
+def make_prefixed_filename(project: str, original_name: str) -> str:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{project}_{ts}_{original_name}"
+
 # =========================
 # CLOUD RUN UPLOAD WIDGET (MOBILE STABLE)
 # =========================
-def cloudrun_upload_widget(
-    *,
-    project: str,
-    bucket: str,
-    title: str,
-    help_text: str,
-    accept: str,
-    multiple: bool = True,
-    height: int = 230,
-    debug: bool = False,
-):
+# =========================
+# CLOUD RUN UPLOAD WIDGET (MOBILE STABLE)
+# =========================
+def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: str, accept: str, multiple: bool = True, height: int = 230):
     """
     bucket: "photos" oder "uploads"
     accept: "image/*" für Fotos, "application/pdf,image/*" für Dokumente
-    debug: zeigt Serverantworten an (hilft beim Testen)
     """
     uid = str(uuid4()).replace("-", "")
-    dbg = "true" if debug else "false"
 
     html = r"""
     <div style="border:1px solid #ddd; padding:15px; border-radius:10px; background-color:#f9f9f9; margin-bottom:20px;">
@@ -248,36 +238,36 @@ def cloudrun_upload_widget(
       const token = "__TOKEN__";
       const bucket = "__BUCKET__";
       const project = "__PROJECT__";
-      const debug = __DEBUG__;
 
       const btn = document.getElementById("uploadBtn___UID__");
       const input = document.getElementById("fileInput___UID__");
       const status = document.getElementById("status___UID__");
 
+      function setStatus(msg) { status.innerText = msg; }
+
       btn.onclick = async function() {
         if (!input.files || input.files.length === 0) {
-          status.innerText = "❌ Bitte Datei wählen.";
+          setStatus("❌ Bitte Datei wählen.");
           return;
         }
 
         btn.disabled = true;
         btn.style.opacity = "0.6";
-        status.innerText = "⏳ Upload läuft...";
 
         let success = 0;
         let errors = 0;
 
         for (let i = 0; i < input.files.length; i++) {
           const file = input.files[i];
-          status.innerText = "⏳ Lade Datei " + (i+1) + " von " + input.files.length + " hoch: " + file.name;
+          setStatus("⏳ Lade Datei " + (i+1) + " von " + input.files.length + " hoch: " + file.name);
 
           const fd = new FormData();
           fd.append("file", file);
           fd.append("project", project);
 
-          // entscheidend fürs Backend
-          const legacyType = (bucket === "uploads") ? "plan" : "photo";
-          fd.append("upload_type", legacyType);
+          // WICHTIG: Backend erwartet "plan" oder "photo"
+          const uploadType = (bucket === "uploads") ? "plan" : "photo";
+          fd.append("upload_type", uploadType);
 
           try {
             const resp = await fetch(url + "/upload", {
@@ -286,20 +276,18 @@ def cloudrun_upload_widget(
               body: fd
             });
 
-            const text = await resp.text();
-
             if (resp.ok) {
               success++;
-              if (debug) {
-                status.innerText = "✅ OK: " + file.name + "\n" + text;
-              }
             } else {
               errors++;
-              status.innerText = "❌ Fehler: " + file.name + "\nHTTP " + resp.status + "\n" + text;
+              // Wenn möglich, Text anzeigen (hilft beim Debuggen)
+              let t = "";
+              try { t = await resp.text(); } catch(e) {}
+              setStatus("❌ Fehler (" + resp.status + ") bei " + file.name + (t ? ("\n" + t) : ""));
             }
           } catch(e) {
             errors++;
-            status.innerText = "❌ Fehler: " + file.name + "\n" + e;
+            setStatus("❌ Netzwerk/Fetch Fehler bei " + file.name);
           }
         }
 
@@ -307,12 +295,10 @@ def cloudrun_upload_widget(
         btn.style.opacity = "1.0";
         input.value = "";
 
-        if (!debug) {
-          if (errors === 0) {
-            status.innerHTML = "<span style='color:green; font-weight:bold'>✅ " + success + " Datei(en) erfolgreich!</span>";
-          } else {
-            status.innerHTML = "<span style='color:red'>⚠️ " + success + " erfolgreich, " + errors + " fehlgeschlagen.</span>";
-          }
+        if (errors === 0) {
+          status.innerHTML = "<span style='color:green; font-weight:bold'>✅ " + success + " Datei(en) erfolgreich!</span>";
+        } else {
+          status.innerHTML = "<span style='color:red'>⚠️ " + success + " erfolgreich, " + errors + " fehlgeschlagen.</span>";
         }
       };
     })();
@@ -329,15 +315,16 @@ def cloudrun_upload_widget(
         .replace("__ACCEPT__", accept)
         .replace("__UID__", uid)
         .replace("__MULT__", "multiple" if multiple else "")
-        .replace("__DEBUG__", dbg)
     )
 
     components.html(html, height=height)
-
-# =========================
 # SAFE IMAGE PREVIEW
 # =========================
 def image_preview_from_drive(file_name: str, mime: str | None, file_id: str):
+    """
+    Fotos sollen lesbar sein -> wir listen nur image/*.
+    Trotzdem schützen wir gegen defekte Dateien.
+    """
     data = download_bytes(file_id)
     if not data:
         st.warning("Konnte Bild nicht laden.")
@@ -434,6 +421,7 @@ if mode == "👷 Mitarbeiter":
     with t2:
         st.subheader("Fotos")
 
+        # Upload nur Bilder
         cloudrun_upload_widget(
             project=project,
             bucket="photos",
@@ -442,12 +430,12 @@ if mode == "👷 Mitarbeiter":
             accept="image/*",
             multiple=True,
             height=240,
-            debug=False,
         )
 
         if st.button("🔄 Fotos aktualisieren", key="refresh_photos_emp"):
             st.rerun()
 
+        # WICHTIG: Nur echte Bilder listen (Drive Query Filter)
         files = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
         proj_photos = [x for x in files if x["name"].startswith(project + "_")][:40]
 
@@ -455,6 +443,7 @@ if mode == "👷 Mitarbeiter":
             st.info("Keine Fotos vorhanden.")
         else:
             for f in proj_photos:
+                # Mitarbeiter: NUR ansehen, NICHT löschen
                 with st.expander(f"🖼️ {f['name']}", expanded=False):
                     image_preview_from_drive(f["name"], f.get("mimeType"), f["id"])
 
@@ -545,55 +534,76 @@ elif mode == "🛠️ Admin":
                 accept="image/*",
                 multiple=True,
                 height=240,
-                debug=False,
             )
 
         with cY:
             st.markdown("### 📄 Pläne/Dokumente (Upload)")
-            # Cloud-Run Upload (wie bisher)
-            cloudrun_upload_widget(
-                project=sel_p,
-                bucket="uploads",
-                title="Dokument(e) hochladen",
-                help_text="PDF/Bilder (Upload Service).",
-                accept="application/pdf,image/*",
-                multiple=True,
-                height=240,
-                debug=True,  # DEBUG AN: du siehst Serverantwort im Widget
-            )
+            st.caption("✅ Direkt-Upload nach Google Drive (funktioniert am PC zuverlässig, meist auch am Handy).")
 
-            # PC-Fallback: direkt nach Drive (damit du testen kannst, auch wenn Backend falsch routet)
-            st.caption("💻 PC-Fallback: Dokumente direkt in Google Drive (Uploads-Ordner)")
-            docs = st.file_uploader(
-                "Dokumente auswählen (PDF/JPG/PNG)",
-                type=["pdf", "jpg", "jpeg", "png", "webp"],
+            admin_docs_files = st.file_uploader(
+                "Dokumente auswählen",
+                type=None,  # alle Typen erlauben
                 accept_multiple_files=True,
-                key="admin_docs_direct",
+                key="admin_docs_uploader",
             )
 
-            if st.button("⬆️ Dokumente direkt hochladen", key="admin_docs_direct_btn"):
-                if not docs:
-                    st.warning("Bitte zuerst Dateien auswählen.")
+            if st.button("📤 Dokument(e) speichern", type="primary", key="admin_docs_upload_btn"):
+                if not admin_docs_files:
+                    st.warning("Bitte zuerst Dokumente auswählen.")
                 else:
-                    ok_count, fail_count = 0, 0
-                    for f in docs:
-                        data = f.getvalue()
-                        mime = getattr(f, "type", None) or "application/octet-stream"
-                        name = make_prefixed_filename(sel_p, f.name)
+                    ok_n = 0
+                    fail_n = 0
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    for f in admin_docs_files:
+                        try:
+                            data = f.getvalue()
+                            mime = getattr(f, "type", None) or "application/octet-stream"
+                            filename = f"{sel_p}_{ts}_{f.name}"
+                            if upload_bytes_to_drive(data, UPLOADS_FOLDER_ID, filename, mime):
+                                ok_n += 1
+                            else:
+                                fail_n += 1
+                        except Exception:
+                            fail_n += 1
 
-                        if upload_bytes_to_drive(data, UPLOADS_FOLDER_ID, name, mime):
-                            ok_count += 1
-                        else:
-                            fail_count += 1
-
-                    if fail_count == 0:
-                        st.success(f"✅ {ok_count} Dokument(e) direkt hochgeladen.")
+                    if fail_n == 0:
+                        st.success(f"✅ {ok_n} Datei(en) in Drive gespeichert.")
                     else:
-                        st.warning(f"⚠️ {ok_count} ok, {fail_count} fehlgeschlagen.")
+                        st.warning(f"⚠️ {ok_n} ok, {fail_n} fehlgeschlagen.")
 
-                    sys_time.sleep(0.3)
+                    sys_time.sleep(0.2)
                     st.rerun()
 
+st.caption("💻 PC-Upload direkt nach Google Drive (Fallback)")
+docs = st.file_uploader(
+    "Dokumente auswählen (PDF/JPG/PNG)",
+    type=["pdf", "jpg", "jpeg", "png"],
+    accept_multiple_files=True,
+    key="admin_docs_direct",
+)
+
+if st.button("⬆️ Dokumente direkt hochladen", key="admin_docs_direct_btn"):
+    if not docs:
+        st.warning("Bitte zuerst Dateien auswählen.")
+    else:
+        ok = 0
+        fail = 0
+        for f in docs:
+            data = f.getvalue()
+            name = make_prefixed_filename(sel_p, f.name)
+            mime = getattr(f, "type", None) or "application/octet-stream"
+            if upload_bytes_to_drive(data, UPLOADS_FOLDER_ID, name, mime):
+                ok += 1
+            else:
+                fail += 1
+
+        if fail == 0:
+            st.success(f"✅ {ok} Dokument(e) erfolgreich hochgeladen.")
+        else:
+            st.warning(f"⚠️ {ok} ok, {fail} fehlgeschlagen.")
+
+        sys_time.sleep(0.3)
+        st.rerun()
         st.divider()
 
         # Fotos Vorschau (lesbar)
@@ -611,6 +621,7 @@ elif mode == "🛠️ Admin":
             for f in admin_photos:
                 with st.expander(f"🖼️ {f['name']}", expanded=False):
                     image_preview_from_drive(f["name"], f.get("mimeType"), f["id"])
+                    # Admin darf löschen
                     if st.button("🗑 Foto löschen", key=f"adm_del_photo_{f['id']}"):
                         delete_file(f["id"])
                         st.success("Gelöscht.")
