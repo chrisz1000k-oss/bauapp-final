@@ -256,7 +256,11 @@ def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: 
           const fd = new FormData();
           fd.append("file", file);
           fd.append("project", project);
-          fd.append("upload_type", bucket === "uploads" ? "plan" : "photo");
+          const legacyType = (bucket === "uploads") ? "plan" : "photo";
+fd.append("upload_type", legacyType);
+fd.append("bucket", bucket);
+fd.append("upload_type_alt", bucket);
+
 
           try {
             const resp = await fetch(url + "/upload", {
