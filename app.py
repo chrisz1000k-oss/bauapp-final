@@ -13,6 +13,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
+
 # =========================
 # PAGE CONFIG & LOGO
 # =========================
@@ -21,6 +22,7 @@ st.set_page_config(page_title="BauApp", layout="wide")
 logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
 if os.path.exists(logo_path):
     st.sidebar.image(logo_path, use_container_width=True)
+
 
 # =========================
 # SECRETS (ROBUST)
@@ -32,12 +34,14 @@ def sget(key: str, default: str = "") -> str:
     except Exception:
         return default
 
+
 def require_secret(key: str) -> str:
     val = sget(key, "")
     if not val:
         st.error(f"Fehlendes Secret: {key}")
         st.stop()
     return val
+
 
 GOOGLE_CLIENT_ID = require_secret("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = require_secret("GOOGLE_CLIENT_SECRET")
@@ -66,6 +70,7 @@ if not UPLOAD_SERVICE_URL or not UPLOAD_SERVICE_TOKEN:
     st.error("Fehler: [upload_service] url/token leer.")
     st.stop()
 
+
 # =========================
 # GOOGLE DRIVE CLIENT
 # =========================
@@ -86,7 +91,9 @@ def get_drive_service():
         st.error(f"Google Drive Auth Fehler: {e}")
         st.stop()
 
+
 drive = get_drive_service()
+
 
 # =========================
 # DRIVE HELPERS
@@ -113,6 +120,7 @@ def list_files(folder_id: str, *, mime_prefix: str | None = None):
         st.error(f"Fehler beim Listen von Dateien: {e}")
         return []
 
+
 def download_bytes(file_id: str):
     try:
         request = drive.files().get_media(fileId=file_id)
@@ -125,6 +133,7 @@ def download_bytes(file_id: str):
     except Exception:
         return None
 
+
 def upload_bytes_to_drive(data: bytes, folder_id: str, filename: str, mimetype: str):
     try:
         file_metadata = {"name": filename, "parents": [folder_id]}
@@ -135,6 +144,7 @@ def upload_bytes_to_drive(data: bytes, folder_id: str, filename: str, mimetype: 
         st.error(f"Upload Fehler: {e}")
         return False
 
+
 def update_file_in_drive(file_id: str, data: bytes, mimetype: str = "text/csv"):
     try:
         media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=True)
@@ -143,6 +153,7 @@ def update_file_in_drive(file_id: str, data: bytes, mimetype: str = "text/csv"):
     except Exception as e:
         st.error(f"Update Fehler: {e}")
         return False
+
 
 def delete_file(file_id: str):
     """Nur im Admin UI verwenden."""
@@ -153,12 +164,14 @@ def delete_file(file_id: str):
         st.error(f"Löschen Fehler: {e}")
         return False
 
+
 # =========================
 # PROJECTS + REPORTS
 # =========================
 PROJECTS_CSV_NAME = "Projects.csv"
 PROJECTS_COLS = ["Projekt", "Status"]
 RAPPORT_COLS = ["Datum", "Projekt", "Mitarbeiter", "Start", "Ende", "Pause_h", "Stunden", "Material", "Bemerkung"]
+
 
 def get_projects_df():
     files = list_files(REPORTS_FOLDER_ID)
@@ -169,11 +182,13 @@ def get_projects_df():
             return pd.read_csv(io.BytesIO(data)), csv_file["id"]
     return pd.DataFrame(columns=PROJECTS_COLS), None
 
+
 def save_projects_df(df, file_id=None):
     csv_data = df.to_csv(index=False).encode("utf-8")
     if file_id:
         return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
     return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, PROJECTS_CSV_NAME, "text/csv")
+
 
 def get_active_projects():
     df, _ = get_projects_df()
@@ -182,6 +197,7 @@ def get_active_projects():
     if "Status" in df.columns:
         return df[df["Status"] == "aktiv"]["Projekt"].tolist()
     return df["Projekt"].tolist()
+
 
 def get_reports_df(project_name: str):
     filename = f"{project_name}_Reports.csv"
@@ -193,6 +209,7 @@ def get_reports_df(project_name: str):
             return pd.read_csv(io.BytesIO(data)), csv_file["id"]
     return pd.DataFrame(columns=RAPPORT_COLS), None
 
+
 def save_report(project_name: str, row_dict: dict) -> bool:
     df, file_id = get_reports_df(project_name)
     df = pd.concat([df, pd.DataFrame([row_dict])], ignore_index=True)
@@ -201,8 +218,9 @@ def save_report(project_name: str, row_dict: dict) -> bool:
         return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
     return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, f"{project_name}_Reports.csv", "text/csv")
 
+
 # =========================
-# CLOUD RUN UPLOAD WIDGET (MOBILE STABLE)
+# CLOUD RUN UPLOAD WIDGET (FIXED FOR DOCS)
 # =========================
 def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: str, accept: str, multiple: bool = True, height: int = 230):
     """
@@ -211,6 +229,10 @@ def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: 
     """
     uid = str(uuid4()).replace("-", "")
 
+    # WICHTIG:
+    # - Für bucket="uploads" wird Dateiname clientseitig auf "Projekt_YYYYMMDD_HHMMSS_original" gesetzt,
+    #   damit deine Filterung (startswith(project+"_")) sicher greift.
+    # - Zusätzlich probieren wir mehrere upload_type Kandidaten, bis das Backend akzeptiert.
     html = r"""
     <div style="border:1px solid #ddd; padding:15px; border-radius:10px; background-color:#f9f9f9; margin-bottom:20px;">
       <div style="font-weight:bold; margin-bottom:5px;">__TITLE__</div>
@@ -236,6 +258,51 @@ def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: 
       const input = document.getElementById("fileInput___UID__");
       const status = document.getElementById("status___UID__");
 
+      function pad2(n){ return (n<10 ? "0"+n : ""+n); }
+      function tsString(){
+        const d = new Date();
+        return d.getFullYear().toString()
+          + pad2(d.getMonth()+1)
+          + pad2(d.getDate()) + "_"
+          + pad2(d.getHours())
+          + pad2(d.getMinutes())
+          + pad2(d.getSeconds());
+      }
+
+      function ensurePrefixedFile(file){
+        // Für Dokumente: sicherer Projekt-Prefix, damit dein Listing es findet.
+        // Für Fotos lassen wir den Namen wie er ist (Backend macht es bei dir bereits korrekt).
+        if (bucket !== "uploads") return file;
+
+        const prefix = project + "_";
+        if (file.name && file.name.startsWith(prefix)) return file;
+
+        const newName = prefix + tsString() + "_" + (file.name || "document");
+        try {
+          // neuer File-Wrapper mit gleichem Inhalt
+          return new File([file], newName, { type: file.type || "application/octet-stream" });
+        } catch(e) {
+          // Fallback: wenn Browser File() nicht unterstützt (sehr selten)
+          return file;
+        }
+      }
+
+      function buildFormData(file, uploadType){
+        const fd = new FormData();
+        fd.append("file", file);
+        fd.append("project", project);
+
+        // wichtigste Felder
+        fd.append("upload_type", uploadType);
+
+        // Zusatz-Felder für abweichende Backends
+        fd.append("bucket", bucket);
+        fd.append("upload_type_alt", bucket);
+        fd.append("kind", uploadType);
+
+        return fd;
+      }
+
       btn.onclick = async function() {
         if (!input.files || input.files.length === 0) {
           status.innerText = "❌ Bitte Datei wählen.";
@@ -250,29 +317,46 @@ def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: 
         let errors = 0;
 
         for (let i = 0; i < input.files.length; i++) {
-          const file = input.files[i];
-          status.innerText = "⏳ Lade Datei " + (i+1) + " von " + input.files.length + " hoch: " + file.name;
+          const rawFile = input.files[i];
+          const file = ensurePrefixedFile(rawFile);
 
-          const fd = new FormData();
-          fd.append("file", file);
-          fd.append("project", project);
-          const legacyType = (bucket === "uploads") ? "plan" : "photo";
-fd.append("upload_type", legacyType);
-fd.append("bucket", bucket);
-fd.append("upload_type_alt", bucket);
+          status.innerText = "⏳ Lade Datei " + (i+1) + " von " + input.files.length + " hoch: " + (file.name || rawFile.name);
 
+          const typeCandidates = (bucket === "uploads")
+            ? ["plan", "uploads", "upload", "document", "file"]
+            : ["photo"];
 
-          try {
-            const resp = await fetch(url + "/upload", {
-              method: "POST",
-              headers: { "X-Upload-Token": token },
-              body: fd
-            });
+          let uploaded = false;
+          let lastErr = "";
 
-            if (resp.ok) success++;
-            else errors++;
-          } catch(e) {
+          for (let t = 0; t < typeCandidates.length; t++) {
+            const uploadType = typeCandidates[t];
+            const fd = buildFormData(file, uploadType);
+
+            try {
+              const resp = await fetch(url + "/upload", {
+                method: "POST",
+                headers: { "X-Upload-Token": token },
+                body: fd
+              });
+
+              if (resp.ok) {
+                success++;
+                uploaded = true;
+                break;
+              } else {
+                const txt = await resp.text();
+                lastErr = "HTTP " + resp.status + " (" + uploadType + "): " + (txt ? txt.slice(0, 300) : "");
+              }
+            } catch(e) {
+              lastErr = "Netzwerkfehler (" + uploadType + "): " + String(e).slice(0, 300);
+            }
+          }
+
+          if (!uploaded) {
             errors++;
+            console.error("Upload fehlgeschlagen:", (file.name || rawFile.name), lastErr);
+            status.innerText = "⚠️ Upload fehlgeschlagen bei: " + (file.name || rawFile.name) + "\\n" + lastErr;
           }
         }
 
@@ -304,14 +388,11 @@ fd.append("upload_type_alt", bucket);
 
     components.html(html, height=height)
 
+
 # =========================
 # SAFE IMAGE PREVIEW
 # =========================
 def image_preview_from_drive(file_name: str, mime: str | None, file_id: str):
-    """
-    Fotos sollen lesbar sein -> wir listen nur image/*.
-    Trotzdem schützen wir gegen defekte Dateien.
-    """
     data = download_bytes(file_id)
     if not data:
         st.warning("Konnte Bild nicht laden.")
@@ -322,11 +403,13 @@ def image_preview_from_drive(file_name: str, mime: str | None, file_id: str):
     except Exception:
         st.warning("Bild konnte nicht angezeigt werden (Format/Upload defekt).")
 
+
 # =========================
 # UI
 # =========================
 st.sidebar.title("Menü")
 mode = st.sidebar.radio("Bereich", ["👷 Mitarbeiter", "🛠️ Admin"])
+
 
 # -------------------------
 # 👷 MITARBEITER
@@ -408,7 +491,6 @@ if mode == "👷 Mitarbeiter":
     with t2:
         st.subheader("Fotos")
 
-        # Upload nur Bilder
         cloudrun_upload_widget(
             project=project,
             bucket="photos",
@@ -422,7 +504,6 @@ if mode == "👷 Mitarbeiter":
         if st.button("🔄 Fotos aktualisieren", key="refresh_photos_emp"):
             st.rerun()
 
-        # WICHTIG: Nur echte Bilder listen (Drive Query Filter)
         files = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
         proj_photos = [x for x in files if x["name"].startswith(project + "_")][:40]
 
@@ -430,7 +511,6 @@ if mode == "👷 Mitarbeiter":
             st.info("Keine Fotos vorhanden.")
         else:
             for f in proj_photos:
-                # Mitarbeiter: NUR ansehen, NICHT löschen
                 with st.expander(f"🖼️ {f['name']}", expanded=False):
                     image_preview_from_drive(f["name"], f.get("mimeType"), f["id"])
 
@@ -454,6 +534,7 @@ if mode == "👷 Mitarbeiter":
                 c1, c2 = st.columns([0.8, 0.2])
                 c1.write(f"📄 {f['name']}")
                 c2.download_button("⬇️", d, file_name=f["name"])
+
 
 # -------------------------
 # 🛠️ ADMIN
@@ -552,7 +633,6 @@ elif mode == "🛠️ Admin":
             for f in admin_photos:
                 with st.expander(f"🖼️ {f['name']}", expanded=False):
                     image_preview_from_drive(f["name"], f.get("mimeType"), f["id"])
-                    # Admin darf löschen
                     if st.button("🗑 Foto löschen", key=f"adm_del_photo_{f['id']}"):
                         delete_file(f["id"])
                         st.success("Gelöscht.")
