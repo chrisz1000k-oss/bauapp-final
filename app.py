@@ -21,6 +21,17 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 # PAGE CONFIG & LOGO
 # =========================
 st.set_page_config(page_title="BauApp", layout="wide")
+st.markdown(
+    """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 
 # --- NEU: Basis-URL Ihrer App (für QR-Codes)
 BASE_APP_URL = "https://8bv6gzagymvrdgnm8wrtrq.streamlit.app"
