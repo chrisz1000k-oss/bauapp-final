@@ -21,6 +21,11 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 # PAGE CONFIG & LOGO
 # =========================
 st.set_page_config(page_title="BauApp", layout="wide")
+# =========================
+# PAGE CONFIG & LOGO
+# =========================
+st.set_page_config(page_title="BauApp", layout="wide")
+
 st.markdown(
     """
     <style>
@@ -39,7 +44,14 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-)
+# --- NEU: Basis-URL Ihrer App (für QR-Codes)
+BASE_APP_URL = "https://8bv6gzagymvrdgnm8wrtrq.streamlit.app"
+
+logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
+if os.path.exists(logo_path):
+    st.sidebar.image(logo_path, use_container_width=True)
+
+
 
 
 # --- NEU: Basis-URL Ihrer App (für QR-Codes)
