@@ -13,6 +13,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
+
 # =========================
 # PAGE CONFIG & LOGO
 # =========================
@@ -21,6 +22,7 @@ st.set_page_config(page_title="BauApp", layout="wide")
 logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
 if os.path.exists(logo_path):
     st.sidebar.image(logo_path, use_container_width=True)
+
 
 # =========================
 # SECRETS (ROBUST)
@@ -32,12 +34,14 @@ def sget(key: str, default: str = "") -> str:
     except Exception:
         return default
 
+
 def require_secret(key: str) -> str:
     val = sget(key, "")
     if not val:
         st.error(f"Fehlendes Secret: {key}")
         st.stop()
     return val
+
 
 GOOGLE_CLIENT_ID = require_secret("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = require_secret("GOOGLE_CLIENT_SECRET")
@@ -66,6 +70,7 @@ if not UPLOAD_SERVICE_URL or not UPLOAD_SERVICE_TOKEN:
     st.error("Fehler: [upload_service] url/token leer.")
     st.stop()
 
+
 # =========================
 # GOOGLE DRIVE CLIENT
 # =========================
@@ -86,7 +91,9 @@ def get_drive_service():
         st.error(f"Google Drive Auth Fehler: {e}")
         st.stop()
 
+
 drive = get_drive_service()
+
 
 # =========================
 # DRIVE HELPERS
@@ -113,6 +120,7 @@ def list_files(folder_id: str, *, mime_prefix: str | None = None):
         st.error(f"Fehler beim Listen von Dateien: {e}")
         return []
 
+
 def download_bytes(file_id: str):
     try:
         request = drive.files().get_media(fileId=file_id)
@@ -125,6 +133,7 @@ def download_bytes(file_id: str):
     except Exception:
         return None
 
+
 def upload_bytes_to_drive(data: bytes, folder_id: str, filename: str, mimetype: str):
     try:
         file_metadata = {"name": filename, "parents": [folder_id]}
@@ -135,6 +144,7 @@ def upload_bytes_to_drive(data: bytes, folder_id: str, filename: str, mimetype: 
         st.error(f"Upload Fehler: {e}")
         return False
 
+
 def update_file_in_drive(file_id: str, data: bytes, mimetype: str = "text/csv"):
     try:
         media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=True)
@@ -143,6 +153,7 @@ def update_file_in_drive(file_id: str, data: bytes, mimetype: str = "text/csv"):
     except Exception as e:
         st.error(f"Update Fehler: {e}")
         return False
+
 
 def delete_file(file_id: str):
     """Nur im Admin UI verwenden."""
@@ -153,12 +164,24 @@ def delete_file(file_id: str):
         st.error(f"Löschen Fehler: {e}")
         return False
 
+
 # =========================
 # PROJECTS + REPORTS
 # =========================
 PROJECTS_CSV_NAME = "Projects.csv"
 PROJECTS_COLS = ["Projekt", "Status"]
-RAPPORT_COLS = ["Datum", "Projekt", "Mitarbeiter", "Start", "Ende", "Pause_h", "Stunden", "Material", "Bemerkung"]
+RAPPORT_COLS = [
+    "Datum",
+    "Projekt",
+    "Mitarbeiter",
+    "Start",
+    "Ende",
+    "Pause_h",
+    "Stunden",
+    "Material",
+    "Bemerkung",
+]
+
 
 def get_projects_df():
     files = list_files(REPORTS_FOLDER_ID)
@@ -169,11 +192,13 @@ def get_projects_df():
             return pd.read_csv(io.BytesIO(data)), csv_file["id"]
     return pd.DataFrame(columns=PROJECTS_COLS), None
 
+
 def save_projects_df(df, file_id=None):
     csv_data = df.to_csv(index=False).encode("utf-8")
     if file_id:
         return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
     return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, PROJECTS_CSV_NAME, "text/csv")
+
 
 def get_active_projects():
     df, _ = get_projects_df()
@@ -182,6 +207,14 @@ def get_active_projects():
     if "Status" in df.columns:
         return df[df["Status"] == "aktiv"]["Projekt"].tolist()
     return df["Projekt"].tolist()
+
+
+def get_all_projects():
+    df, _ = get_projects_df()
+    if df.empty:
+        return []
+    return df["Projekt"].tolist()
+
 
 def get_reports_df(project_name: str):
     filename = f"{project_name}_Reports.csv"
@@ -193,6 +226,7 @@ def get_reports_df(project_name: str):
             return pd.read_csv(io.BytesIO(data)), csv_file["id"]
     return pd.DataFrame(columns=RAPPORT_COLS), None
 
+
 def save_report(project_name: str, row_dict: dict) -> bool:
     df, file_id = get_reports_df(project_name)
     df = pd.concat([df, pd.DataFrame([row_dict])], ignore_index=True)
@@ -201,20 +235,28 @@ def save_report(project_name: str, row_dict: dict) -> bool:
         return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
     return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, f"{project_name}_Reports.csv", "text/csv")
 
+
 def make_prefixed_filename(project: str, original_name: str) -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{project}_{ts}_{original_name}"
 
+
 # =========================
 # CLOUD RUN UPLOAD WIDGET (MOBILE STABLE)
 # =========================
-# =========================
-# CLOUD RUN UPLOAD WIDGET (MOBILE STABLE)
-# =========================
-def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: str, accept: str, multiple: bool = True, height: int = 230):
+def cloudrun_upload_widget(
+    *,
+    project: str,
+    bucket: str,
+    title: str,
+    help_text: str,
+    accept: str,
+    multiple: bool = True,
+    height: int = 230,
+):
     """
-    bucket: "photos" oder "uploads"
-    accept: "image/*" für Fotos, "application/pdf,image/*" für Dokumente
+    bucket: "photos" oder "uploads" (uploads wird aktuell nur als Typ-Unterscheidung verwendet)
+    accept: "image/*" für Fotos
     """
     uid = str(uuid4()).replace("-", "")
 
@@ -265,7 +307,7 @@ def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: 
           fd.append("file", file);
           fd.append("project", project);
 
-          // WICHTIG: Backend erwartet "plan" oder "photo"
+          // Backend erwartet "plan" oder "photo"
           const uploadType = (bucket === "uploads") ? "plan" : "photo";
           fd.append("upload_type", uploadType);
 
@@ -280,7 +322,6 @@ def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: 
               success++;
             } else {
               errors++;
-              // Wenn möglich, Text anzeigen (hilft beim Debuggen)
               let t = "";
               try { t = await resp.text(); } catch(e) {}
               setStatus("❌ Fehler (" + resp.status + ") bei " + file.name + (t ? ("\n" + t) : ""));
@@ -305,8 +346,8 @@ def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: 
     </script>
     """
 
-    html = (html
-        .replace("__TITLE__", title)
+    html = (
+        html.replace("__TITLE__", title)
         .replace("__HELP__", help_text)
         .replace("__URL__", UPLOAD_SERVICE_URL)
         .replace("__TOKEN__", UPLOAD_SERVICE_TOKEN)
@@ -318,28 +359,28 @@ def cloudrun_upload_widget(*, project: str, bucket: str, title: str, help_text: 
     )
 
     components.html(html, height=height)
+
+
+# =========================
 # SAFE IMAGE PREVIEW
 # =========================
-def image_preview_from_drive(file_name: str, mime: str | None, file_id: str):
-    """
-    Fotos sollen lesbar sein -> wir listen nur image/*.
-    Trotzdem schützen wir gegen defekte Dateien.
-    """
+def image_preview_from_drive(file_id: str):
     data = download_bytes(file_id)
     if not data:
         st.warning("Konnte Bild nicht laden.")
         return
-
     try:
         st.image(data, use_container_width=True)
     except Exception:
         st.warning("Bild konnte nicht angezeigt werden (Format/Upload defekt).")
+
 
 # =========================
 # UI
 # =========================
 st.sidebar.title("Menü")
 mode = st.sidebar.radio("Bereich", ["👷 Mitarbeiter", "🛠️ Admin"])
+
 
 # -------------------------
 # 👷 MITARBEITER
@@ -380,20 +421,23 @@ if mode == "👷 Mitarbeiter":
             if not ma_val.strip():
                 st.error("Name fehlt.")
             else:
-                ok = save_report(project, {
-                    "Datum": str(date_val),
-                    "Projekt": project,
-                    "Mitarbeiter": ma_val.strip(),
-                    "Start": str(start_val),
-                    "Ende": str(end_val),
-                    "Pause_h": pause_val,
-                    "Stunden": dur,
-                    "Material": mat_val,
-                    "Bemerkung": rem_val
-                })
+                ok = save_report(
+                    project,
+                    {
+                        "Datum": str(date_val),
+                        "Projekt": project,
+                        "Mitarbeiter": ma_val.strip(),
+                        "Start": str(start_val),
+                        "Ende": str(end_val),
+                        "Pause_h": pause_val,
+                        "Stunden": dur,
+                        "Material": mat_val,
+                        "Bemerkung": rem_val,
+                    },
+                )
                 if ok:
                     st.success("Gespeichert!")
-                    sys_time.sleep(0.4)
+                    sys_time.sleep(0.3)
                     st.rerun()
                 else:
                     st.error("Speichern fehlgeschlagen (Drive). Bitte erneut versuchen.")
@@ -421,7 +465,6 @@ if mode == "👷 Mitarbeiter":
     with t2:
         st.subheader("Fotos")
 
-        # Upload nur Bilder
         cloudrun_upload_widget(
             project=project,
             bucket="photos",
@@ -435,19 +478,17 @@ if mode == "👷 Mitarbeiter":
         if st.button("🔄 Fotos aktualisieren", key="refresh_photos_emp"):
             st.rerun()
 
-        # WICHTIG: Nur echte Bilder listen (Drive Query Filter)
         files = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
-        proj_photos = [x for x in files if x["name"].startswith(project + "_")][:40]
+        proj_photos = [x for x in files if x["name"].startswith(project + "_")][:60]
 
         if not proj_photos:
             st.info("Keine Fotos vorhanden.")
         else:
             for f in proj_photos:
-                # Mitarbeiter: NUR ansehen, NICHT löschen
                 with st.expander(f"🖼️ {f['name']}", expanded=False):
-                    image_preview_from_drive(f["name"], f.get("mimeType"), f["id"])
+                    image_preview_from_drive(f["id"])
 
-    # --- PLÄNE / DOKUMENTE (DOWNLOAD OK) ---
+    # --- PLÄNE / DOKUMENTE (DOWNLOAD) ---
     with t3:
         st.subheader("Pläne & Dokumente")
 
@@ -455,7 +496,7 @@ if mode == "👷 Mitarbeiter":
             st.rerun()
 
         files = list_files(UPLOADS_FOLDER_ID)
-        proj_docs = [x for x in files if x["name"].startswith(project + "_")][:100]
+        proj_docs = [x for x in files if x["name"].startswith(project + "_")][:200]
 
         if not proj_docs:
             st.info("Keine Dokumente hinterlegt.")
@@ -466,13 +507,14 @@ if mode == "👷 Mitarbeiter":
                     continue
                 c1, c2 = st.columns([0.8, 0.2])
                 c1.write(f"📄 {f['name']}")
-                c2.download_button("⬇️", d, file_name=f["name"])
+                c2.download_button("⬇️ Download", d, file_name=f["name"])
+
 
 # -------------------------
 # 🛠️ ADMIN
 # -------------------------
 elif mode == "🛠️ Admin":
-    st.title("Admin")
+    st.title("🛠️ Admin")
 
     pin = st.text_input("PIN", type="password")
     if pin != ADMIN_PIN:
@@ -480,7 +522,7 @@ elif mode == "🛠️ Admin":
 
     st.success("Angemeldet")
 
-    tabA, tabB, tabC = st.tabs(["📌 Projekte", "📂 Uploads & Vorschau", "🧾 Rapporte"])
+    tabA, tabB, tabC = st.tabs(["📌 Projekte", "📂 Uploads & Übersicht", "🧾 Rapporte"])
 
     # --- Projekte ---
     with tabA:
@@ -490,7 +532,10 @@ elif mode == "🛠️ Admin":
         c1, c2 = st.columns([0.7, 0.3])
         new_p = c1.text_input("Neues Projekt")
         if c2.button("➕ Anlegen") and new_p.strip():
-            df_p = pd.concat([df_p, pd.DataFrame([{"Projekt": new_p.strip(), "Status": "aktiv"}])], ignore_index=True)
+            df_p = pd.concat(
+                [df_p, pd.DataFrame([{"Projekt": new_p.strip(), "Status": "aktiv"}])],
+                ignore_index=True,
+            )
             save_projects_df(df_p, pid)
             st.success("Projekt angelegt.")
             st.rerun()
@@ -511,21 +556,23 @@ elif mode == "🛠️ Admin":
                 st.success("Status geändert.")
                 st.rerun()
 
-    # --- Uploads & Vorschau ---
+    # --- Uploads & Übersicht ---
     with tabB:
-        st.subheader("Uploads (mobil + PC)")
+        st.subheader("Uploads & Übersicht (wie Mitarbeiter, plus Löschen)")
 
-        projs = get_active_projects()
-        if not projs:
-            st.info("Erstelle zuerst ein aktives Projekt.")
+        # Admin darf hier alle Projekte sehen (auch archivierte, falls du willst)
+        projs_all = get_all_projects()
+        if not projs_all:
+            st.info("Erstelle zuerst ein Projekt.")
             st.stop()
 
-        sel_p = st.selectbox("Projekt", projs, key="admin_sel_project_upload")
+        sel_p = st.selectbox("Projekt", projs_all, key="admin_sel_project_upload")
 
+        # Upload oben
         cX, cY = st.columns(2)
 
         with cX:
-            st.markdown("### 📷 Fotos (Upload)")
+            st.markdown("### 📷 Fotos (Upload via Cloud Run)")
             cloudrun_upload_widget(
                 project=sel_p,
                 bucket="photos",
@@ -537,8 +584,8 @@ elif mode == "🛠️ Admin":
             )
 
         with cY:
-            st.markdown("### 📄 Pläne/Dokumente (Upload)")
-            st.caption("✅ Direkt-Upload nach Google Drive (funktioniert am PC zuverlässig, meist auch am Handy).")
+            st.markdown("### 📄 Pläne/Dokumente (Upload direkt nach Drive)")
+            st.caption("Dieser Upload ist bewusst im Adminbereich (PC zuverlässig; Handy je nach Browser).")
 
             admin_docs_files = st.file_uploader(
                 "Dokumente auswählen",
@@ -574,39 +621,9 @@ elif mode == "🛠️ Admin":
                     sys_time.sleep(0.2)
                     st.rerun()
 
-st.caption("💻 PC-Upload direkt nach Google Drive (Fallback)")
-docs = st.file_uploader(
-    "Dokumente auswählen (PDF/JPG/PNG)",
-    type=["pdf", "jpg", "jpeg", "png"],
-    accept_multiple_files=True,
-    key="admin_docs_direct",
-)
-
-if st.button("⬆️ Dokumente direkt hochladen", key="admin_docs_direct_btn"):
-    if not docs:
-        st.warning("Bitte zuerst Dateien auswählen.")
-    else:
-        ok = 0
-        fail = 0
-        for f in docs:
-            data = f.getvalue()
-            name = make_prefixed_filename(sel_p, f.name)
-            mime = getattr(f, "type", None) or "application/octet-stream"
-            if upload_bytes_to_drive(data, UPLOADS_FOLDER_ID, name, mime):
-                ok += 1
-            else:
-                fail += 1
-
-        if fail == 0:
-            st.success(f"✅ {ok} Dokument(e) erfolgreich hochgeladen.")
-        else:
-            st.warning(f"⚠️ {ok} ok, {fail} fehlgeschlagen.")
-
-        sys_time.sleep(0.3)
-        st.rerun()
         st.divider()
 
-        # Übersicht pro Projekt (wie im Mitarbeiterbereich)
+        # Übersicht unten: wie Mitarbeiter + Löschbuttons
         tabF, tabD = st.tabs(["📷 Fotos – Übersicht", "📄 Pläne/Dokumente – Übersicht"])
 
         # -------- Fotos --------
@@ -617,18 +634,17 @@ if st.button("⬆️ Dokumente direkt hochladen", key="admin_docs_direct_btn"):
                 st.rerun()
 
             files_ph = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
-            admin_photos = [x for x in files_ph if x["name"].startswith(sel_p + "_")][:120]
+            admin_photos = [x for x in files_ph if x["name"].startswith(sel_p + "_")][:180]
 
             if not admin_photos:
                 st.info("Keine Fotos vorhanden.")
             else:
-                # kleine Galerie (3 Spalten)
                 cols = st.columns(3)
                 for idx, f in enumerate(admin_photos):
                     col = cols[idx % 3]
                     with col:
                         with st.expander(f"🖼️ {f['name']}", expanded=False):
-                            image_preview_from_drive(f["name"], f.get("mimeType"), f["id"])
+                            image_preview_from_drive(f["id"])
                             if st.button("🗑 Foto löschen", key=f"adm_del_photo_{f['id']}"):
                                 delete_file(f["id"])
                                 st.success("Gelöscht.")
@@ -643,7 +659,7 @@ if st.button("⬆️ Dokumente direkt hochladen", key="admin_docs_direct_btn"):
                 st.rerun()
 
             files_docs = list_files(UPLOADS_FOLDER_ID)
-            admin_docs = [x for x in files_docs if x["name"].startswith(sel_p + "_")][:200]
+            admin_docs = [x for x in files_docs if x["name"].startswith(sel_p + "_")][:400]
 
             if not admin_docs:
                 st.info("Keine Dokumente vorhanden.")
@@ -665,9 +681,9 @@ if st.button("⬆️ Dokumente direkt hochladen", key="admin_docs_direct_btn"):
     with tabC:
         st.subheader("Rapporte ansehen")
 
-        projs = get_active_projects()
+        projs = get_all_projects()
         if not projs:
-            st.info("Keine aktiven Projekte.")
+            st.info("Keine Projekte vorhanden.")
             st.stop()
 
         sel_rp = st.selectbox("Projekt", projs, key="admin_sel_reports")
@@ -690,5 +706,4 @@ if st.button("⬆️ Dokumente direkt hochladen", key="admin_docs_direct_btn"):
                 "⬇️ Rapporte als CSV herunterladen",
                 df_view.to_csv(index=False).encode("utf-8"),
                 file_name=f"{sel_rp}_Reports.csv",
-                mime="text/csv",
             )
