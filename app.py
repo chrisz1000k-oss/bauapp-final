@@ -1,15 +1,15 @@
 import io
 import os
 import time as sys_time
-import base64  # --- NEU: Für Bild-Einbettung im HTML
+import base64
 from datetime import datetime, time, timedelta
 from uuid import uuid4
-from urllib.parse import quote  # --- NEU: Für URL-Encoding
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import qrcode  # --- NEU: QR-Code Bibliothek
+import qrcode
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -18,45 +18,29 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 
 # =========================
-# PAGE CONFIG & LOGO
-# =========================
-st.set_page_config(page_title="BauApp", layout="wide")
-# =========================
-# PAGE CONFIG & LOGO
+# PAGE CONFIG / CHROME / LOGO
 # =========================
 st.set_page_config(page_title="BauApp", layout="wide")
 
+# Streamlit UI-Chrome so gut wie möglich ausblenden (für normale User).
+# Hinweis: Als Streamlit-Cloud-Owner am Desktop können Owner-Controls trotzdem sichtbar bleiben.
 st.markdown(
     """
     <style>
-    /* Altes Streamlit-Menü */
     #MainMenu {display: none !important;}
-
-    /* Neuer Streamlit-Cloud Menübereich (rechts oben) */
     [data-testid="stToolbar"] {display: none !important;}
     [data-testid="stHeader"] {display: none !important;}
     [data-testid="stStatusWidget"] {display: none !important;}
-
-    /* Footer unten */
     footer {display: none !important;}
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# --- NEU: Basis-URL Ihrer App (für QR-Codes)
+# Basis-URL Ihrer App (für QR-Codes) – NUR EINMAL
 BASE_APP_URL = "https://8bv6gzagymvrdgnm8wrtrq.streamlit.app"
 
-logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
-if os.path.exists(logo_path):
-    st.sidebar.image(logo_path, use_container_width=True)
-
-
-
-
-# --- NEU: Basis-URL Ihrer App (für QR-Codes)
-BASE_APP_URL = "https://8bv6gzagymvrdgnm8wrtrq.streamlit.app"
-
+# Logo – NUR EINMAL
 logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
 if os.path.exists(logo_path):
     st.sidebar.image(logo_path, use_container_width=True)
@@ -147,12 +131,16 @@ def list_files(folder_id: str, *, mime_prefix: str | None = None):
         if mime_prefix:
             q += f" and mimeType contains '{mime_prefix}'"
 
-        res = drive.files().list(
-            q=q,
-            pageSize=200,
-            fields="files(id,name,mimeType,createdTime)",
-            orderBy="createdTime desc",
-        ).execute()
+        res = (
+            drive.files()
+            .list(
+                q=q,
+                pageSize=200,
+                fields="files(id,name,mimeType,createdTime)",
+                orderBy="createdTime desc",
+            )
+            .execute()
+        )
         return res.get("files", [])
     except Exception as e:
         st.error(f"Fehler beim Listen von Dateien: {e}")
@@ -204,13 +192,15 @@ def delete_file(file_id: str):
 
 
 # =========================
-# QR CODE & PRINT TEMPLATE (NEU)
+# QR CODE & PRINT TEMPLATE
 # =========================
 def generate_project_qr(project_name: str) -> bytes:
-    """Erzeugt einen QR-Code, der direkt auf das Projekt verlinkt."""
-    # Leerzeichen etc. sicher codieren
+    """
+    Erzeugt einen QR-Code, der direkt auf das Projekt verlinkt.
+    WICHTIG: embed=true, damit Mitarbeiter/Normalnutzer keine Cloud-Toolbar sehen.
+    """
     safe_project = quote(project_name)
-    link = f"{BASE_APP_URL}?project={safe_project}"
+    link = f"{BASE_APP_URL}?embed=true&project={safe_project}"
 
     qr = qrcode.QRCode(
         version=1,
@@ -222,17 +212,14 @@ def generate_project_qr(project_name: str) -> bytes:
     qr.make(fit=True)
 
     img = qr.make_image(fill_color="black", back_color="white")
-    
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+
 def get_printable_html(project_name, qr_bytes):
     """Erzeugt HTML im Design von R. BAUMGARTNER AG."""
-    # QR-Code in Base64 umwandeln
     qr_b64 = base64.b64encode(qr_bytes).decode("utf-8")
-    
-    # Datum von heute für den Footer
     today_str = datetime.now().strftime("%d.%m.%Y")
 
     html = f"""
@@ -241,26 +228,23 @@ def get_printable_html(project_name, qr_bytes):
     <head>
         <style>
             body {{ font-family: Arial, Helvetica, sans-serif; padding: 20px; font-size: 12px; color: black; }}
-            
-            /* HEADER BEREICH */
+
             .header-top {{ display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 10px; }}
             .company-name {{ font-size: 24px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }}
             .order-info {{ font-weight: bold; font-size: 14px; }}
-            
-            /* INFO GITTER MIT QR CODE */
+
             .info-grid {{ display: grid; grid-template-columns: 1fr 150px; gap: 20px; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10px; }}
             .info-lines {{ display: flex; flex-direction: column; gap: 8px; }}
-            
+
             .input-line {{ display: flex; align-items: flex-end; }}
             .label {{ width: 100px; font-weight: bold; font-size: 11px; }}
             .value {{ flex-grow: 1; border-bottom: 1px solid #000; padding-left: 5px; min-height: 18px; }}
-            .value-filled {{ font-weight: bold; font-size: 13px; }} /* Projektname fett */
-            
+            .value-filled {{ font-weight: bold; font-size: 13px; }}
+
             .qr-box {{ border: 1px solid #ccc; text-align: center; padding: 2px; height: 130px; display: flex; flex-direction: column; align-items: center; justify-content: center; }}
             .qr-box img {{ width: 110px; height: 110px; }}
             .qr-header {{ font-size: 10px; font-weight: bold; margin-bottom: 2px; text-transform: uppercase; }}
-            
-            /* CHECKBOXEN BEREICH */
+
             .check-section {{ margin-bottom: 15px; border-bottom: 1px solid #000; padding-bottom: 5px; }}
             .check-header {{ text-align: right; font-size: 11px; font-weight: bold; margin-bottom: 2px; }}
             .check-row {{ display: flex; justify-content: space-between; margin-bottom: 4px; border-bottom: 1px solid #eee; }}
@@ -268,19 +252,16 @@ def get_printable_html(project_name, qr_bytes):
             .check-label {{ width: 80px; font-size: 11px; }}
             .check-box {{ width: 12px; height: 12px; border: 1px solid #000; margin-left: 10px; display: inline-block; }}
             .check-right {{ font-size: 10px; color: #888; text-align: right; }}
-            
-            /* HAUPTTABELLE */
+
             .main-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; border: 1px solid #000; }}
             .main-table th {{ border: 1px solid #000; padding: 5px; text-align: left; background-color: #fff; font-weight: bold; font-size: 12px; }}
             .main-table td {{ border-right: 1px solid #000; height: 24px; vertical-align: bottom; }}
-            
-            /* Spaltenbreiten */
+
             .col-desc {{ width: 70%; text-align: left; padding-left: 5px; border-bottom: 1px dotted #ccc; }}
             .col-mat {{ width: 30%; border-bottom: 1px solid #000; }}
-            
-            /* Footer/Notizen */
+
             .footer-date {{ margin-top: 20px; font-size: 12px; }}
-            
+
             @media print {{
                 body {{ padding: 0; margin: 0; }}
                 button {{ display: none; }}
@@ -317,7 +298,7 @@ def get_printable_html(project_name, qr_bytes):
                     <span class="value"></span>
                 </div>
             </div>
-            
+
             <div class="qr-box">
                 <div class="qr-header">STUNDEN / APP</div>
                 <img src="data:image/png;base64,{qr_b64}" />
@@ -326,7 +307,7 @@ def get_printable_html(project_name, qr_bytes):
 
         <div class="check-section">
             <div class="check-header">FUGENFARBEN</div>
-            
+
             <div class="check-row">
                 <div class="check-left"><span class="check-label">CODE</span> <span class="check-box"></span></div>
                 <div class="check-right">ZEM. / SIL.</div>
@@ -349,24 +330,24 @@ def get_printable_html(project_name, qr_bytes):
                 </tr>
             </thead>
             <tbody>
-                """ + "".join([f"""
+                {"".join([f"""
                 <tr>
                     <td class="col-desc"></td>
                     <td class="col-mat"></td>
                 </tr>
-                """ for _ in range(12)]) + f"""
-                
+                """ for _ in range(12)])}
+
                 <tr>
                     <td class="col-desc"></td>
                     <td class="col-mat" style="text-align:center; font-weight:bold; font-size:10px; background-color:#f9f9f9; border-top: 2px solid #000; border-bottom: 1px solid #000;">MATERIAL REGIE</td>
                 </tr>
-                
-                """ + "".join([f"""
+
+                {"".join([f"""
                 <tr>
                     <td class="col-desc"></td>
                     <td class="col-mat"></td>
                 </tr>
-                """ for _ in range(8)]) + f"""
+                """ for _ in range(8)])}
             </tbody>
         </table>
 
@@ -449,11 +430,6 @@ def save_report(project_name: str, row_dict: dict) -> bool:
     if file_id:
         return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
     return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, f"{project_name}_Reports.csv", "text/csv")
-
-
-def make_prefixed_filename(project: str, original_name: str) -> str:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{project}_{ts}_{original_name}"
 
 
 # =========================
@@ -596,11 +572,10 @@ def image_preview_from_drive(file_id: str):
 st.sidebar.title("Menü")
 mode = st.sidebar.radio("Bereich", ["👷 Mitarbeiter", "🛠️ Admin"])
 
-# --- NEU: Deep Linking Check
+# Deep Linking (QR)
 target_project_from_qr = None
 if "project" in st.query_params:
-    potential_project = st.query_params["project"]
-    target_project_from_qr = potential_project
+    target_project_from_qr = st.query_params["project"]
 
 
 # -------------------------
@@ -614,17 +589,18 @@ if mode == "👷 Mitarbeiter":
         st.warning("Keine aktiven Projekte.")
         st.stop()
 
-    # --- NEU: Automatische Vorauswahl durch QR-Code
     default_index = 0
     if target_project_from_qr:
         if target_project_from_qr in active_projects:
             default_index = active_projects.index(target_project_from_qr)
             st.success(f"📍 Direkteinstieg via QR-Code: {target_project_from_qr}")
         else:
-            st.warning(f"Das Projekt '{target_project_from_qr}' aus dem QR-Code ist nicht aktiv oder existiert nicht.")
+            st.warning(
+                f"Das Projekt '{target_project_from_qr}' aus dem QR-Code ist nicht aktiv oder existiert nicht."
+            )
 
     project = st.selectbox("Projekt wählen", active_projects, index=default_index)
-    
+
     t1, t2, t3 = st.tabs(["📝 Rapport", "📷 Fotos", "📂 Pläne"])
 
     # --- RAPPORT ---
@@ -692,7 +668,7 @@ if mode == "👷 Mitarbeiter":
                 df_view = df_h
             st.dataframe(df_view.tail(50), use_container_width=True)
 
-    # --- FOTOS (LESBAR) ---
+    # --- FOTOS ---
     with t2:
         st.subheader("Fotos")
 
@@ -762,34 +738,31 @@ elif mode == "🛠️ Admin":
 
         c1, c2 = st.columns([0.7, 0.3])
         new_p = c1.text_input("Neues Projekt")
-        
-        # --- NEU: QR Code Generierung beim Erstellen
+
         if c2.button("➕ Anlegen") and new_p.strip():
             project_name = new_p.strip()
-            # 1. Speichern in CSV
             df_p = pd.concat(
                 [df_p, pd.DataFrame([{"Projekt": project_name, "Status": "aktiv"}])],
                 ignore_index=True,
             )
             save_projects_df(df_p, pid)
-            
+
             st.success(f"Projekt '{project_name}' angelegt.")
-            
-            # 2. QR Code generieren und anzeigen
+
             st.divider()
             st.subheader(f"QR-Code für {project_name}")
-            
+
             qr_bytes = generate_project_qr(project_name)
-            
+
             col_qr1, col_qr2 = st.columns([0.3, 0.7])
             col_qr1.image(qr_bytes, width=200, caption=f"Scan für {project_name}")
-            
+
             col_qr2.info("Diesen Code können Sie herunterladen und auf dem Rapport-Formular platzieren.")
             col_qr2.download_button(
                 label="⬇️ QR-Code (.png) herunterladen",
                 data=qr_bytes,
                 file_name=f"QR_{project_name}.png",
-                mime="image/png"
+                mime="image/png",
             )
 
         if df_p.empty:
@@ -803,43 +776,39 @@ elif mode == "🛠️ Admin":
             st.subheader("Projekt Status ändern")
             all_projs = df_p["Projekt"].tolist()
             sel = st.selectbox("Projekt wählen", all_projs, key="admin_status_proj")
-            new_status = st.radio("Neuer Status", ["aktiv", "archiviert"], horizontal=True, key="admin_status_radio")
+            new_status = st.radio(
+                "Neuer Status",
+                ["aktiv", "archiviert"],
+                horizontal=True,
+                key="admin_status_radio",
+            )
             if st.button("Status speichern", key="admin_save_status"):
                 df_p.loc[df_p["Projekt"] == sel, "Status"] = new_status
                 save_projects_df(df_p, pid)
                 st.success("Status geändert.")
                 st.rerun()
 
-        # --- NEU: Druckvorlagen Generator ---
         st.divider()
         st.subheader("🖨️ Druckvorlage erstellen (Scan-Design)")
 
         if not df_p.empty:
             print_proj = st.selectbox("Projekt für Druck wählen", get_active_projects(), key="print_sel")
-
             if st.button("Vorschau generieren", key="btn_preview"):
-                # 1. QR Bytes generieren
                 qrb = generate_project_qr(print_proj)
-                
-                # 2. HTML erzeugen (im Design von R. BAUMGARTNER AG)
                 html_code = get_printable_html(print_proj, qrb)
-                
-                # 3. HTML anzeigen
+
                 st.components.v1.html(html_code, height=600, scrolling=True)
-                
-                # 4. Download
                 st.download_button(
                     label="Druckdatei (.html) herunterladen",
                     data=html_code,
                     file_name=f"Rapport_{print_proj}.html",
-                    mime="text/html"
+                    mime="text/html",
                 )
 
     # --- Uploads & Übersicht ---
     with tabB:
         st.subheader("Uploads & Übersicht (wie Mitarbeiter, plus Löschen)")
 
-        # Admin darf hier alle Projekte sehen (auch archivierte, falls du willst)
         projs_all = get_all_projects()
         if not projs_all:
             st.info("Erstelle zuerst ein Projekt.")
@@ -847,7 +816,6 @@ elif mode == "🛠️ Admin":
 
         sel_p = st.selectbox("Projekt", projs_all, key="admin_sel_project_upload")
 
-        # Upload oben
         cX, cY = st.columns(2)
 
         with cX:
@@ -868,7 +836,7 @@ elif mode == "🛠️ Admin":
 
             admin_docs_files = st.file_uploader(
                 "Dokumente auswählen",
-                type=None,  # alle Typen erlauben
+                type=None,
                 accept_multiple_files=True,
                 key="admin_docs_uploader",
             )
@@ -902,10 +870,8 @@ elif mode == "🛠️ Admin":
 
         st.divider()
 
-        # Übersicht unten: wie Mitarbeiter + Löschbuttons
         tabF, tabD = st.tabs(["📷 Fotos – Übersicht", "📄 Pläne/Dokumente – Übersicht"])
 
-        # -------- Fotos --------
         with tabF:
             c1, c2 = st.columns([0.7, 0.3])
             c1.subheader("📷 Fotos – Vorschau")
@@ -930,7 +896,6 @@ elif mode == "🛠️ Admin":
                                 sys_time.sleep(0.2)
                                 st.rerun()
 
-        # -------- Dokumente --------
         with tabD:
             c1, c2 = st.columns([0.7, 0.3])
             c1.subheader("📄 Pläne/Dokumente – Download")
