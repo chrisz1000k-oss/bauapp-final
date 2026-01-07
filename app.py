@@ -584,6 +584,16 @@ if "project" in st.query_params:
 if mode == "👷 Mitarbeiter":
     st.title("👷 Mitarbeiterbereich")
 
+    # 📲 BauApp als Verknüpfung (Handy / Startbildschirm)
+    emp_link = f"{BASE_APP_URL}?embed=true"
+    st.info(
+        "📲 **BauApp als Verknüpfung speichern**\n\n"
+        f"👉 Öffne diesen Link: {emp_link}\n\n"
+        "• **iPhone (Safari):** Teilen → *Zum Home-Bildschirm*\n"
+        "• **Android (Chrome):** ⋮ → *Zum Startbildschirm hinzufügen* / *App installieren*"
+    )
+    st.link_button("🔗 Mitarbeiter-Link öffnen", emp_link)
+
     active_projects = get_active_projects()
     if not active_projects:
         st.warning("Keine aktiven Projekte.")
