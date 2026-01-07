@@ -570,7 +570,16 @@ def image_preview_from_drive(file_id: str):
 # UI & DEEP LINKING LOGIC
 # =========================
 st.sidebar.title("Menü")
-mode = st.sidebar.radio("Bereich", ["👷 Mitarbeiter", "🛠️ Admin"])
+default_mode = 0  # 👷 Mitarbeiter
+if st.query_params.get("mode") == "admin":
+    default_mode = 1  # 🛠️ Admin
+
+mode = st.sidebar.radio(
+    "Bereich",
+    ["👷 Mitarbeiter", "🛠️ Admin"],
+    index=default_mode
+)
+
 
 # Deep Linking (QR)
 target_project_from_qr = None
@@ -739,7 +748,19 @@ elif mode == "🛠️ Admin":
 
     st.success("Angemeldet")
 
+    # 🔐 Admin-Verknüpfung (für Handy / Startbildschirm)
+    admin_link = f"{BASE_APP_URL}?mode=admin"
+    st.info(
+        "🔐 **Adminbereich als Verknüpfung speichern**\n\n"
+        f"👉 Öffne diesen Link: {admin_link}\n\n"
+        "• **iPhone (Safari):** Teilen → *Zum Home-Bildschirm*\n"
+        "• **Android (Chrome):** ⋮ → *Zum Startbildschirm hinzufügen*\n\n"
+        "⚠️ Zugriff nur mit Admin-PIN"
+    )
+    st.link_button("🔗 Admin-Link öffnen", admin_link)
+
     tabA, tabB, tabC = st.tabs(["📌 Projekte", "📂 Uploads & Übersicht", "🧾 Rapporte"])
+
 
     # --- Projekte ---
     with tabA:
