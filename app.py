@@ -25,12 +25,11 @@ if os.path.exists(logo_path):
 
 
 # =========================
-# SECRETS (ROBUST)
+# SECRETS
 # =========================
 def sget(key: str, default: str = "") -> str:
     try:
-        val = st.secrets.get(key, default)
-        return str(val).strip()
+        return str(st.secrets.get(key, default)).strip()
     except Exception:
         return default
 
@@ -53,7 +52,6 @@ REPORTS_FOLDER_ID = require_secret("REPORTS_FOLDER_ID")
 
 ADMIN_PIN = sget("ADMIN_PIN", "1234")
 
-# Upload Service (Sektion [upload_service])
 upload_section = st.secrets.get("upload_service")
 if not upload_section:
     st.error("Fehler: Sektion [upload_service] fehlt in secrets.toml.")
@@ -62,7 +60,7 @@ if not upload_section:
 try:
     UPLOAD_SERVICE_URL = str(upload_section["url"]).strip().rstrip("/")
     UPLOAD_SERVICE_TOKEN = str(upload_section["token"]).strip()
-except KeyError:
+except Exception:
     st.error("Fehler: In [upload_service] fehlen 'url' oder 'token'.")
     st.stop()
 
@@ -72,7 +70,7 @@ if not UPLOAD_SERVICE_URL or not UPLOAD_SERVICE_TOKEN:
 
 
 # =========================
-# GOOGLE DRIVE CLIENT
+# GOOGLE DRIVE
 # =========================
 def get_drive_service():
     try:
@@ -99,11 +97,6 @@ drive = get_drive_service()
 # DRIVE HELPERS
 # =========================
 def list_files(folder_id: str, *, mime_prefix: str | None = None):
-    """
-    Listet Dateien im Ordner.
-    mime_prefix="image/" -> nur Bilder
-    mime_prefix=None -> alles
-    """
     try:
         q = f"'{folder_id}' in parents and trashed=false"
         if mime_prefix:
@@ -156,7 +149,6 @@ def update_file_in_drive(file_id: str, data: bytes, mimetype: str = "text/csv"):
 
 
 def delete_file(file_id: str):
-    """Nur im Admin UI verwenden."""
     try:
         drive.files().delete(fileId=file_id).execute()
         return True
@@ -170,17 +162,7 @@ def delete_file(file_id: str):
 # =========================
 PROJECTS_CSV_NAME = "Projects.csv"
 PROJECTS_COLS = ["Projekt", "Status"]
-RAPPORT_COLS = [
-    "Datum",
-    "Projekt",
-    "Mitarbeiter",
-    "Start",
-    "Ende",
-    "Pause_h",
-    "Stunden",
-    "Material",
-    "Bemerkung",
-]
+RAPPORT_COLS = ["Datum", "Projekt", "Mitarbeiter", "Start", "Ende", "Pause_h", "Stunden", "Material", "Bemerkung"]
 
 
 def get_projects_df():
@@ -236,28 +218,19 @@ def save_report(project_name: str, row_dict: dict) -> bool:
     return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, f"{project_name}_Reports.csv", "text/csv")
 
 
-def make_prefixed_filename(project: str, original_name: str) -> str:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{project}_{ts}_{original_name}"
-
-
 # =========================
-# CLOUD RUN UPLOAD WIDGET (MOBILE STABLE)
+# CLOUD RUN UPLOAD WIDGET
 # =========================
 def cloudrun_upload_widget(
     *,
     project: str,
-    bucket: str,
+    bucket: str,       # "photos" oder "uploads"
     title: str,
     help_text: str,
     accept: str,
     multiple: bool = True,
     height: int = 230,
 ):
-    """
-    bucket: "photos" oder "uploads" (uploads wird aktuell nur als Typ-Unterscheidung verwendet)
-    accept: "image/*" für Fotos
-    """
     uid = str(uuid4()).replace("-", "")
 
     html = r"""
@@ -307,7 +280,6 @@ def cloudrun_upload_widget(
           fd.append("file", file);
           fd.append("project", project);
 
-          // Backend erwartet "plan" oder "photo"
           const uploadType = (bucket === "uploads") ? "plan" : "photo";
           fd.append("upload_type", uploadType);
 
@@ -421,20 +393,17 @@ if mode == "👷 Mitarbeiter":
             if not ma_val.strip():
                 st.error("Name fehlt.")
             else:
-                ok = save_report(
-                    project,
-                    {
-                        "Datum": str(date_val),
-                        "Projekt": project,
-                        "Mitarbeiter": ma_val.strip(),
-                        "Start": str(start_val),
-                        "Ende": str(end_val),
-                        "Pause_h": pause_val,
-                        "Stunden": dur,
-                        "Material": mat_val,
-                        "Bemerkung": rem_val,
-                    },
-                )
+                ok = save_report(project, {
+                    "Datum": str(date_val),
+                    "Projekt": project,
+                    "Mitarbeiter": ma_val.strip(),
+                    "Start": str(start_val),
+                    "Ende": str(end_val),
+                    "Pause_h": pause_val,
+                    "Stunden": dur,
+                    "Material": mat_val,
+                    "Bemerkung": rem_val
+                })
                 if ok:
                     st.success("Gespeichert!")
                     sys_time.sleep(0.3)
@@ -461,7 +430,7 @@ if mode == "👷 Mitarbeiter":
                 df_view = df_h
             st.dataframe(df_view.tail(50), use_container_width=True)
 
-    # --- FOTOS (LESBAR) ---
+    # --- FOTOS ---
     with t2:
         st.subheader("Fotos")
 
@@ -488,7 +457,7 @@ if mode == "👷 Mitarbeiter":
                 with st.expander(f"🖼️ {f['name']}", expanded=False):
                     image_preview_from_drive(f["id"])
 
-    # --- PLÄNE / DOKUMENTE (DOWNLOAD) ---
+    # --- PLÄNE (nur Anzeige/Download) ---
     with t3:
         st.subheader("Pläne & Dokumente")
 
@@ -532,10 +501,7 @@ elif mode == "🛠️ Admin":
         c1, c2 = st.columns([0.7, 0.3])
         new_p = c1.text_input("Neues Projekt")
         if c2.button("➕ Anlegen") and new_p.strip():
-            df_p = pd.concat(
-                [df_p, pd.DataFrame([{"Projekt": new_p.strip(), "Status": "aktiv"}])],
-                ignore_index=True,
-            )
+            df_p = pd.concat([df_p, pd.DataFrame([{"Projekt": new_p.strip(), "Status": "aktiv"}])], ignore_index=True)
             save_projects_df(df_p, pid)
             st.success("Projekt angelegt.")
             st.rerun()
@@ -560,7 +526,6 @@ elif mode == "🛠️ Admin":
     with tabB:
         st.subheader("Uploads & Übersicht (wie Mitarbeiter, plus Löschen)")
 
-        # Admin darf hier alle Projekte sehen (auch archivierte, falls du willst)
         projs_all = get_all_projects()
         if not projs_all:
             st.info("Erstelle zuerst ein Projekt.")
@@ -568,7 +533,6 @@ elif mode == "🛠️ Admin":
 
         sel_p = st.selectbox("Projekt", projs_all, key="admin_sel_project_upload")
 
-        # Upload oben
         cX, cY = st.columns(2)
 
         with cX:
@@ -584,49 +548,22 @@ elif mode == "🛠️ Admin":
             )
 
         with cY:
-            st.markdown("### 📄 Pläne/Dokumente (Upload direkt nach Drive)")
-            st.caption("Dieser Upload ist bewusst im Adminbereich (PC zuverlässig; Handy je nach Browser).")
-
-            admin_docs_files = st.file_uploader(
-                "Dokumente auswählen",
-                type=None,  # alle Typen erlauben
-                accept_multiple_files=True,
-                key="admin_docs_uploader",
+            st.markdown("### 📄 Pläne/Dokumente (Upload via Cloud Run)")
+            st.caption("Mobil & PC stabil. Beliebige Dateitypen (PDF, DWG, JPG, etc.).")
+            cloudrun_upload_widget(
+                project=sel_p,
+                bucket="uploads",  # -> upload_type="plan"
+                title="Pläne/Dokumente hochladen",
+                help_text="Dateien auswählen und hochladen. Danach unten in der Übersicht sichtbar (ggf. 🔄).",
+                accept="*/*",
+                multiple=True,
+                height=240,
             )
-
-            if st.button("📤 Dokument(e) speichern", type="primary", key="admin_docs_upload_btn"):
-                if not admin_docs_files:
-                    st.warning("Bitte zuerst Dokumente auswählen.")
-                else:
-                    ok_n = 0
-                    fail_n = 0
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    for f in admin_docs_files:
-                        try:
-                            data = f.getvalue()
-                            mime = getattr(f, "type", None) or "application/octet-stream"
-                            filename = f"{sel_p}_{ts}_{f.name}"
-                            if upload_bytes_to_drive(data, UPLOADS_FOLDER_ID, filename, mime):
-                                ok_n += 1
-                            else:
-                                fail_n += 1
-                        except Exception:
-                            fail_n += 1
-
-                    if fail_n == 0:
-                        st.success(f"✅ {ok_n} Datei(en) in Drive gespeichert.")
-                    else:
-                        st.warning(f"⚠️ {ok_n} ok, {fail_n} fehlgeschlagen.")
-
-                    sys_time.sleep(0.2)
-                    st.rerun()
 
         st.divider()
 
-        # Übersicht unten: wie Mitarbeiter + Löschbuttons
         tabF, tabD = st.tabs(["📷 Fotos – Übersicht", "📄 Pläne/Dokumente – Übersicht"])
 
-        # -------- Fotos --------
         with tabF:
             c1, c2 = st.columns([0.7, 0.3])
             c1.subheader("📷 Fotos – Vorschau")
@@ -651,7 +588,6 @@ elif mode == "🛠️ Admin":
                                 sys_time.sleep(0.2)
                                 st.rerun()
 
-        # -------- Dokumente --------
         with tabD:
             c1, c2 = st.columns([0.7, 0.3])
             c1.subheader("📄 Pläne/Dokumente – Download")
