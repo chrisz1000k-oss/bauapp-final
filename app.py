@@ -24,12 +24,21 @@ st.set_page_config(page_title="BauApp", layout="wide")
 st.markdown(
     """
     <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
+    /* Altes Streamlit-Menü */
+    #MainMenu {display: none !important;}
+
+    /* Neuer Streamlit-Cloud Menübereich (rechts oben) */
+    [data-testid="stToolbar"] {display: none !important;}
+    [data-testid="stHeader"] {display: none !important;}
+    [data-testid="stStatusWidget"] {display: none !important;}
+
+    /* Footer unten */
+    footer {display: none !important;}
     </style>
     """,
     unsafe_allow_html=True
+)
+
 )
 
 
