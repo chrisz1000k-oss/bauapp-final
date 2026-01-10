@@ -1,6 +1,13 @@
 streamlit
 pandas
+
 google-api-python-client
+google-auth
 google-auth-httplib2
 google-auth-oauthlib
+
+reportlab
+openpyxl
 qrcode[pil]
+pillow
+bcrypt
