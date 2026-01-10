@@ -1,984 +1,682 @@
 import io
-import os
-import time as sys_time
-import base64
-from datetime import datetime, time, timedelta
-from uuid import uuid4
-from urllib.parse import quote
+import secrets
+from datetime import datetime, date, time, timedelta
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 import qrcode
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+
+from drive_store import load_csv, save_csv, upload_bytes, download_bytes, ensure_subfolder, list_files
+from data_models import (
+    PROJECTS_FILE, EMPLOYEES_FILE, REPORTS_FILE, WEEKLY_SIG_FILE,
+    ensure_projects, ensure_employees, ensure_reports, ensure_weekly_signatures,
+    now_utc_iso, week_id_from_date, token_hash,
+    bcrypt_hash_pin, bcrypt_check_pin
+)
+from pdf_engine import generate_weekly_pdf
+from gmail_service import send_text_email, send_pdf_email
 
 
-# =========================
-# PAGE CONFIG / CHROME / LOGO
-# =========================
+# -------------------------
+# UI / Config
+# -------------------------
 st.set_page_config(page_title="BauApp", layout="wide")
-
-# Streamlit UI-Chrome so gut wie möglich ausblenden (für normale User).
-# Hinweis: Als Streamlit-Cloud-Owner am Desktop können Owner-Controls trotzdem sichtbar bleiben.
 st.markdown(
     """
     <style>
     #MainMenu {display: none !important;}
     [data-testid="stToolbar"] {display: none !important;}
     [data-testid="stHeader"] {display: none !important;}
-    [data-testid="stStatusWidget"] {display: none !important;}
     footer {display: none !important;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Basis-URL Ihrer App (für QR-Codes) – NUR EINMAL
-BASE_APP_URL = "https://8bv6gzagymvrdgnm8wrtrq.streamlit.app"
 
-# Logo – NUR EINMAL
-logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
-if os.path.exists(logo_path):
-    st.sidebar.image(logo_path, use_container_width=True)
-
-
-# =========================
-# SECRETS (ROBUST)
-# =========================
-def sget(key: str, default: str = "") -> str:
+def sget(key: str, default=""):
     try:
-        val = st.secrets.get(key, default)
-        return str(val).strip()
+        return st.secrets.get(key, default)
     except Exception:
         return default
 
 
 def require_secret(key: str) -> str:
-    val = sget(key, "")
-    if not val:
+    v = str(sget(key, "")).strip()
+    if not v:
         st.error(f"Fehlendes Secret: {key}")
         st.stop()
-    return val
+    return v
 
 
+# Secrets
 GOOGLE_CLIENT_ID = require_secret("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = require_secret("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = require_secret("GOOGLE_REFRESH_TOKEN")
 
+REPORTS_FOLDER_ID = require_secret("REPORTS_FOLDER_ID")
 PHOTOS_FOLDER_ID = require_secret("PHOTOS_FOLDER_ID")
 UPLOADS_FOLDER_ID = require_secret("UPLOADS_FOLDER_ID")
-REPORTS_FOLDER_ID = require_secret("REPORTS_FOLDER_ID")
 
-ADMIN_PIN = sget("ADMIN_PIN", "1234")
+BASE_APP_URL = str(sget("BASE_APP_URL", "")).strip().rstrip("/")
+GMAIL_SENDER = str(sget("GMAIL_SENDER", "me")).strip()
+ENABLE_GMAIL = str(sget("ENABLE_GMAIL", "0")).strip() == "1"
 
-# Upload Service (Sektion [upload_service])
-upload_section = st.secrets.get("upload_service")
-if not upload_section:
-    st.error("Fehler: Sektion [upload_service] fehlt in secrets.toml.")
-    st.stop()
-
-try:
-    UPLOAD_SERVICE_URL = str(upload_section["url"]).strip().rstrip("/")
-    UPLOAD_SERVICE_TOKEN = str(upload_section["token"]).strip()
-except KeyError:
-    st.error("Fehler: In [upload_service] fehlen 'url' oder 'token'.")
-    st.stop()
-
-if not UPLOAD_SERVICE_URL or not UPLOAD_SERVICE_TOKEN:
-    st.error("Fehler: [upload_service] url/token leer.")
-    st.stop()
+ADMIN_PIN = str(sget("ADMIN_PIN", sget("ADMIN", ""))).strip()  # kompatibel zu deiner Benennung
+EXPORTS_SUBFOLDER_NAME = str(sget("EXPORTS_SUBFOLDER_NAME", "Exports")).strip()
 
 
-# =========================
-# GOOGLE DRIVE CLIENT
-# =========================
-def get_drive_service():
-    try:
-        creds = Credentials(
-            token=None,
-            refresh_token=GOOGLE_REFRESH_TOKEN,
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=GOOGLE_CLIENT_ID,
-            client_secret=GOOGLE_CLIENT_SECRET,
-            scopes=["https://www.googleapis.com/auth/drive"],
-        )
-        if not creds.valid:
-            creds.refresh(Request())
-        return build("drive", "v3", credentials=creds)
-    except Exception as e:
-        st.error(f"Google Drive Auth Fehler: {e}")
-        st.stop()
+# -------------------------
+# Google services
+# -------------------------
+def get_google_services():
+    scopes = ["https://www.googleapis.com/auth/drive"]
+    if ENABLE_GMAIL:
+        scopes.append("https://www.googleapis.com/auth/gmail.send")
 
-
-drive = get_drive_service()
-
-
-# =========================
-# DRIVE HELPERS
-# =========================
-def list_files(folder_id: str, *, mime_prefix: str | None = None):
-    """
-    Listet Dateien im Ordner.
-    mime_prefix="image/" -> nur Bilder
-    mime_prefix=None -> alles
-    """
-    try:
-        q = f"'{folder_id}' in parents and trashed=false"
-        if mime_prefix:
-            q += f" and mimeType contains '{mime_prefix}'"
-
-        res = (
-            drive.files()
-            .list(
-                q=q,
-                pageSize=200,
-                fields="files(id,name,mimeType,createdTime)",
-                orderBy="createdTime desc",
-            )
-            .execute()
-        )
-        return res.get("files", [])
-    except Exception as e:
-        st.error(f"Fehler beim Listen von Dateien: {e}")
-        return []
-
-
-def download_bytes(file_id: str):
-    try:
-        request = drive.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        return fh.getvalue()
-    except Exception:
-        return None
-
-
-def upload_bytes_to_drive(data: bytes, folder_id: str, filename: str, mimetype: str):
-    try:
-        file_metadata = {"name": filename, "parents": [folder_id]}
-        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=True)
-        drive.files().create(body=file_metadata, media_body=media, fields="id").execute()
-        return True
-    except Exception as e:
-        st.error(f"Upload Fehler: {e}")
-        return False
-
-
-def update_file_in_drive(file_id: str, data: bytes, mimetype: str = "text/csv"):
-    try:
-        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=True)
-        drive.files().update(fileId=file_id, media_body=media).execute()
-        return True
-    except Exception as e:
-        st.error(f"Update Fehler: {e}")
-        return False
-
-
-def delete_file(file_id: str):
-    """Nur im Admin UI verwenden."""
-    try:
-        drive.files().delete(fileId=file_id).execute()
-        return True
-    except Exception as e:
-        st.error(f"Löschen Fehler: {e}")
-        return False
-
-
-# =========================
-# QR CODE & PRINT TEMPLATE
-# =========================
-def generate_project_qr(project_name: str) -> bytes:
-    """
-    Erzeugt einen QR-Code, der direkt auf das Projekt verlinkt.
-    WICHTIG: embed=true, damit Mitarbeiter/Normalnutzer keine Cloud-Toolbar sehen.
-    """
-    safe_project = quote(project_name)
-    link = f"{BASE_APP_URL}?embed=true&project={safe_project}"
-
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
-        border=4,
+    creds = Credentials(
+        token=None,
+        refresh_token=GOOGLE_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        scopes=scopes,
     )
+    if not creds.valid:
+        creds.refresh(Request())
+
+    drive = build("drive", "v3", credentials=creds)
+    gmail = build("gmail", "v1", credentials=creds) if ENABLE_GMAIL else None
+    return drive, gmail
+
+
+drive, gmail = get_google_services()
+
+
+# -------------------------
+# Load + ensure tables
+# -------------------------
+def load_all_tables():
+    df_p, pid = load_csv(drive, folder_id=REPORTS_FOLDER_ID, filename=PROJECTS_FILE)
+    df_e, eid = load_csv(drive, folder_id=REPORTS_FOLDER_ID, filename=EMPLOYEES_FILE)
+    df_r, rid = load_csv(drive, folder_id=REPORTS_FOLDER_ID, filename=REPORTS_FILE)
+    df_s, sid = load_csv(drive, folder_id=REPORTS_FOLDER_ID, filename=WEEKLY_SIG_FILE)
+
+    df_p = ensure_projects(df_p)
+    df_e = ensure_employees(df_e)
+    df_r = ensure_reports(df_r)
+    df_s = ensure_weekly_signatures(df_s)
+    return (df_p, pid), (df_e, eid), (df_r, rid), (df_s, sid)
+
+
+def save_table(filename: str, df: pd.DataFrame, file_id):
+    return save_csv(drive, folder_id=REPORTS_FOLDER_ID, filename=filename, df=df, file_id=file_id)
+
+
+def compute_hours(start_t: time, end_t: time, pause_h: float) -> float:
+    dt_start = datetime.combine(datetime.today(), start_t)
+    dt_end = datetime.combine(datetime.today(), end_t)
+    if dt_end < dt_start:
+        dt_end += timedelta(days=1)
+    return round(max(0.0, (dt_end - dt_start).total_seconds() / 3600 - float(pause_h or 0)), 2)
+
+
+def project_qr_png(project_name: str) -> bytes:
+    if BASE_APP_URL:
+        link = f"{BASE_APP_URL}?project={project_name}"
+    else:
+        link = project_name
+
+    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=8, border=3)
     qr.add_data(link)
     qr.make(fit=True)
-
     img = qr.make_image(fill_color="black", back_color="white")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
 
-def get_printable_html(project_name, qr_bytes):
-    """Erzeugt HTML im Design von R. BAUMGARTNER AG."""
-    qr_b64 = base64.b64encode(qr_bytes).decode("utf-8")
-    today_str = datetime.now().strftime("%d.%m.%Y")
+# -------------------------
+# Download via token
+# -------------------------
+qp = st.query_params
+if "download_token" in qp:
+    tok = qp.get("download_token")
+    (df_p, _), (df_e, _), (df_r, _), (df_s, sid) = load_all_tables()
 
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body {{ font-family: Arial, Helvetica, sans-serif; padding: 20px; font-size: 12px; color: black; }}
+    h = token_hash(tok)
+    hit = df_s[(df_s["token_hash"] == h) & df_s["pdf_file_id"].notna()].tail(1)
+    if hit.empty:
+        st.error("Token ungültig oder abgelaufen.")
+        st.stop()
 
-            .header-top {{ display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 10px; }}
-            .company-name {{ font-size: 24px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }}
-            .order-info {{ font-weight: bold; font-size: 14px; }}
+    # expiry check (optional)
+    exp = hit.iloc[0].get("token_expires_at")
+    if exp:
+        try:
+            if datetime.utcnow() > datetime.fromisoformat(str(exp)):
+                st.error("Token abgelaufen.")
+                st.stop()
+        except Exception:
+            pass
 
-            .info-grid {{ display: grid; grid-template-columns: 1fr 150px; gap: 20px; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10px; }}
-            .info-lines {{ display: flex; flex-direction: column; gap: 8px; }}
+    pdf_id = hit.iloc[0]["pdf_file_id"]
+    pdf_bytes = download_bytes(drive, pdf_id)
+    if not pdf_bytes:
+        st.error("PDF nicht gefunden.")
+        st.stop()
 
-            .input-line {{ display: flex; align-items: flex-end; }}
-            .label {{ width: 100px; font-weight: bold; font-size: 11px; }}
-            .value {{ flex-grow: 1; border-bottom: 1px solid #000; padding-left: 5px; min-height: 18px; }}
-            .value-filled {{ font-weight: bold; font-size: 13px; }}
-
-            .qr-box {{ border: 1px solid #ccc; text-align: center; padding: 2px; height: 130px; display: flex; flex-direction: column; align-items: center; justify-content: center; }}
-            .qr-box img {{ width: 110px; height: 110px; }}
-            .qr-header {{ font-size: 10px; font-weight: bold; margin-bottom: 2px; text-transform: uppercase; }}
-
-            .check-section {{ margin-bottom: 15px; border-bottom: 1px solid #000; padding-bottom: 5px; }}
-            .check-header {{ text-align: right; font-size: 11px; font-weight: bold; margin-bottom: 2px; }}
-            .check-row {{ display: flex; justify-content: space-between; margin-bottom: 4px; border-bottom: 1px solid #eee; }}
-            .check-left {{ display: flex; align-items: center; }}
-            .check-label {{ width: 80px; font-size: 11px; }}
-            .check-box {{ width: 12px; height: 12px; border: 1px solid #000; margin-left: 10px; display: inline-block; }}
-            .check-right {{ font-size: 10px; color: #888; text-align: right; }}
-
-            .main-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; border: 1px solid #000; }}
-            .main-table th {{ border: 1px solid #000; padding: 5px; text-align: left; background-color: #fff; font-weight: bold; font-size: 12px; }}
-            .main-table td {{ border-right: 1px solid #000; height: 24px; vertical-align: bottom; }}
-
-            .col-desc {{ width: 70%; text-align: left; padding-left: 5px; border-bottom: 1px dotted #ccc; }}
-            .col-mat {{ width: 30%; border-bottom: 1px solid #000; }}
-
-            .footer-date {{ margin-top: 20px; font-size: 12px; }}
-
-            @media print {{
-                body {{ padding: 0; margin: 0; }}
-                button {{ display: none; }}
-            }}
-        </style>
-    </head>
-    <body>
-
-        <div class="header-top">
-            <div class="company-name">R. BAUMGARTNER AG</div>
-            <div class="order-info">Auftragsnr. ___________ &nbsp; RBAG ___________</div>
-        </div>
-
-        <div class="info-grid">
-            <div class="info-lines">
-                <div class="input-line">
-                    <span class="label">OBJEKT</span>
-                    <span class="value value-filled">{project_name}</span>
-                </div>
-                <div class="input-line">
-                    <span class="label">KUNDE</span>
-                    <span class="value"></span>
-                </div>
-                <div class="input-line">
-                    <span class="label">TELEFON</span>
-                    <span class="value"></span>
-                </div>
-                <div class="input-line" style="margin-top: 10px;">
-                    <span class="label">KONTAKTPER.</span>
-                    <span class="value"></span>
-                </div>
-                <div class="input-line">
-                    <span class="label">TELEFON</span>
-                    <span class="value"></span>
-                </div>
-            </div>
-
-            <div class="qr-box">
-                <div class="qr-header">STUNDEN / APP</div>
-                <img src="data:image/png;base64,{qr_b64}" />
-            </div>
-        </div>
-
-        <div class="check-section">
-            <div class="check-header">FUGENFARBEN</div>
-
-            <div class="check-row">
-                <div class="check-left"><span class="check-label">CODE</span> <span class="check-box"></span></div>
-                <div class="check-right">ZEM. / SIL.</div>
-            </div>
-            <div class="check-row">
-                <div class="check-left"><span class="check-label">MATERIAL</span> <span class="check-box"></span></div>
-                <div class="check-right">ZEM. / SIL.</div>
-            </div>
-            <div class="check-row">
-                <div class="check-left"><span class="check-label">ASBEST</span> <span class="check-box"></span></div>
-                <div class="check-right">ZEM. / SIL.</div>
-            </div>
-        </div>
-
-        <table class="main-table">
-            <thead>
-                <tr>
-                    <th class="col-desc" style="border-bottom: 1px solid #000;">ARBEITSBESCHRIEB & NOTIZEN</th>
-                    <th class="col-mat">Material</th>
-                </tr>
-            </thead>
-            <tbody>
-                {"".join([f"""
-                <tr>
-                    <td class="col-desc"></td>
-                    <td class="col-mat"></td>
-                </tr>
-                """ for _ in range(12)])}
-
-                <tr>
-                    <td class="col-desc"></td>
-                    <td class="col-mat" style="text-align:center; font-weight:bold; font-size:10px; background-color:#f9f9f9; border-top: 2px solid #000; border-bottom: 1px solid #000;">MATERIAL REGIE</td>
-                </tr>
-
-                {"".join([f"""
-                <tr>
-                    <td class="col-desc"></td>
-                    <td class="col-mat"></td>
-                </tr>
-                """ for _ in range(8)])}
-            </tbody>
-        </table>
-
-        <div class="footer-date">
-            {today_str}
-        </div>
-
-    </body>
-    </html>
-    """
-    return html
-
-
-# =========================
-# PROJECTS + REPORTS
-# =========================
-PROJECTS_CSV_NAME = "Projects.csv"
-PROJECTS_COLS = ["Projekt", "Status"]
-RAPPORT_COLS = [
-    "Datum",
-    "Projekt",
-    "Mitarbeiter",
-    "Start",
-    "Ende",
-    "Pause_h",
-    "Stunden",
-    "Material",
-    "Bemerkung",
-]
-
-
-def get_projects_df():
-    files = list_files(REPORTS_FOLDER_ID)
-    csv_file = next((f for f in files if f["name"] == PROJECTS_CSV_NAME), None)
-    if csv_file:
-        data = download_bytes(csv_file["id"])
-        if data:
-            return pd.read_csv(io.BytesIO(data)), csv_file["id"]
-    return pd.DataFrame(columns=PROJECTS_COLS), None
-
-
-def save_projects_df(df, file_id=None):
-    csv_data = df.to_csv(index=False).encode("utf-8")
-    if file_id:
-        return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
-    return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, PROJECTS_CSV_NAME, "text/csv")
-
-
-def get_active_projects():
-    df, _ = get_projects_df()
-    if df.empty:
-        return []
-    if "Status" in df.columns:
-        return df[df["Status"] == "aktiv"]["Projekt"].tolist()
-    return df["Projekt"].tolist()
-
-
-def get_all_projects():
-    df, _ = get_projects_df()
-    if df.empty:
-        return []
-    return df["Projekt"].tolist()
-
-
-def get_reports_df(project_name: str):
-    filename = f"{project_name}_Reports.csv"
-    files = list_files(REPORTS_FOLDER_ID)
-    csv_file = next((f for f in files if f["name"] == filename), None)
-    if csv_file:
-        data = download_bytes(csv_file["id"])
-        if data:
-            return pd.read_csv(io.BytesIO(data)), csv_file["id"]
-    return pd.DataFrame(columns=RAPPORT_COLS), None
-
-
-def save_report(project_name: str, row_dict: dict) -> bool:
-    df, file_id = get_reports_df(project_name)
-    df = pd.concat([df, pd.DataFrame([row_dict])], ignore_index=True)
-    csv_data = df.to_csv(index=False).encode("utf-8")
-    if file_id:
-        return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
-    return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, f"{project_name}_Reports.csv", "text/csv")
-
-
-# =========================
-# CLOUD RUN UPLOAD WIDGET (MOBILE STABLE)
-# =========================
-def cloudrun_upload_widget(
-    *,
-    project: str,
-    bucket: str,
-    title: str,
-    help_text: str,
-    accept: str,
-    multiple: bool = True,
-    height: int = 230,
-):
-    """
-    bucket: "photos" oder "uploads" (uploads wird aktuell nur als Typ-Unterscheidung verwendet)
-    accept: "image/*" für Fotos
-    """
-    uid = str(uuid4()).replace("-", "")
-
-    html = r"""
-    <div style="border:1px solid #ddd; padding:15px; border-radius:10px; background-color:#f9f9f9; margin-bottom:20px;">
-      <div style="font-weight:bold; margin-bottom:5px;">__TITLE__</div>
-      <div style="font-size:12px; color:#555; margin-bottom:10px;">__HELP__</div>
-
-      <input id="fileInput___UID__" type="file" __MULT__ accept="__ACCEPT__" style="margin-bottom:10px; width:100%;" />
-
-      <button id="uploadBtn___UID__" style="background-color:#FF4B4B; color:white; border:none; padding:10px 20px; border-radius:5px; cursor:pointer; font-weight:bold; width:100%;">
-        📤 Hochladen
-      </button>
-
-      <div id="status___UID__" style="margin-top:10px; font-size:14px; white-space: pre-wrap;"></div>
-    </div>
-
-    <script>
-    (function() {
-      const url = "__URL__";
-      const token = "__TOKEN__";
-      const bucket = "__BUCKET__";
-      const project = "__PROJECT__";
-
-      const btn = document.getElementById("uploadBtn___UID__");
-      const input = document.getElementById("fileInput___UID__");
-      const status = document.getElementById("status___UID__");
-
-      function setStatus(msg) { status.innerText = msg; }
-
-      btn.onclick = async function() {
-        if (!input.files || input.files.length === 0) {
-          setStatus("❌ Bitte Datei wählen.");
-          return;
-        }
-
-        btn.disabled = true;
-        btn.style.opacity = "0.6";
-
-        let success = 0;
-        let errors = 0;
-
-        for (let i = 0; i < input.files.length; i++) {
-          const file = input.files[i];
-          setStatus("⏳ Lade Datei " + (i+1) + " von " + input.files.length + " hoch: " + file.name);
-
-          const fd = new FormData();
-          fd.append("file", file);
-          fd.append("project", project);
-
-          // Backend erwartet "plan" oder "photo"
-          const uploadType = (bucket === "uploads") ? "plan" : "photo";
-          fd.append("upload_type", uploadType);
-
-          try {
-            const resp = await fetch(url + "/upload", {
-              method: "POST",
-              headers: { "X-Upload-Token": token },
-              body: fd
-            });
-
-            if (resp.ok) {
-              success++;
-            } else {
-              errors++;
-              let t = "";
-              try { t = await resp.text(); } catch(e) {}
-              setStatus("❌ Fehler (" + resp.status + ") bei " + file.name + (t ? ("\n" + t) : ""));
-            }
-          } catch(e) {
-            errors++;
-            setStatus("❌ Netzwerk/Fetch Fehler bei " + file.name);
-          }
-        }
-
-        btn.disabled = false;
-        btn.style.opacity = "1.0";
-        input.value = "";
-
-        if (errors === 0) {
-          status.innerHTML = "<span style='color:green; font-weight:bold'>✅ " + success + " Datei(en) erfolgreich!</span>";
-        } else {
-          status.innerHTML = "<span style='color:red'>⚠️ " + success + " erfolgreich, " + errors + " fehlgeschlagen.</span>";
-        }
-      };
-    })();
-    </script>
-    """
-
-    html = (
-        html.replace("__TITLE__", title)
-        .replace("__HELP__", help_text)
-        .replace("__URL__", UPLOAD_SERVICE_URL)
-        .replace("__TOKEN__", UPLOAD_SERVICE_TOKEN)
-        .replace("__BUCKET__", bucket)
-        .replace("__PROJECT__", project)
-        .replace("__ACCEPT__", accept)
-        .replace("__UID__", uid)
-        .replace("__MULT__", "multiple" if multiple else "")
-    )
-
-    components.html(html, height=height)
-
-
-# =========================
-# SAFE IMAGE PREVIEW
-# =========================
-def image_preview_from_drive(file_id: str):
-    data = download_bytes(file_id)
-    if not data:
-        st.warning("Konnte Bild nicht laden.")
-        return
-    try:
-        st.image(data, use_container_width=True)
-    except Exception:
-        st.warning("Bild konnte nicht angezeigt werden (Format/Upload defekt).")
-
-
-# =========================
-# UI & DEEP LINKING LOGIC
-# =========================
-st.sidebar.title("Menü")
-default_mode = 0  # 👷 Mitarbeiter
-if st.query_params.get("mode") == "admin":
-    default_mode = 1  # 🛠️ Admin
-
-mode = st.sidebar.radio(
-    "Bereich",
-    ["👷 Mitarbeiter", "🛠️ Admin"],
-    index=default_mode
-)
-
-
-# Deep Linking (QR)
-target_project_from_qr = None
-if "project" in st.query_params:
-    target_project_from_qr = st.query_params["project"]
+    st.title("Download Wochenrapport")
+    st.download_button("⬇️ PDF herunterladen", pdf_bytes, file_name="Wochenrapport.pdf", mime="application/pdf")
+    st.stop()
 
 
 # -------------------------
-# 👷 MITARBEITER
+# UI
+# -------------------------
+st.sidebar.title("BauApp")
+mode = st.sidebar.radio("Bereich", ["👷 Mitarbeiter", "🛠️ Admin"], index=0)
+
+target_project = qp.get("project", None)
+
+
+# -------------------------
+# Mitarbeiter
 # -------------------------
 if mode == "👷 Mitarbeiter":
     st.title("👷 Mitarbeiterbereich")
 
-    # 📲 BauApp als Verknüpfung (Handy / Startbildschirm)
-    emp_link = f"{BASE_APP_URL}?embed=true"
-    st.info(
-        "📲 **BauApp als Verknüpfung speichern**\n\n"
-        f"👉 Öffne diesen Link: {emp_link}\n\n"
-        "• **iPhone (Safari):** Teilen → *Zum Home-Bildschirm*\n"
-        "• **Android (Chrome):** ⋮ → *Zum Startbildschirm hinzufügen* / *App installieren*"
-    )
-    st.link_button("🔗 Mitarbeiter-Link öffnen", emp_link)
+    (df_p, _), (df_e, _), (df_r, rid), (df_s, sid) = load_all_tables()
+    df_p_active = df_p[df_p["status"] == "aktiv"].copy()
 
-    active_projects = get_active_projects()
-    if not active_projects:
+    if df_p_active.empty:
         st.warning("Keine aktiven Projekte.")
         st.stop()
 
-    default_index = 0
-    if target_project_from_qr:
-        if target_project_from_qr in active_projects:
-            default_index = active_projects.index(target_project_from_qr)
-            st.success(f"📍 Direkteinstieg via QR-Code: {target_project_from_qr}")
-        else:
-            st.warning(
-                f"Das Projekt '{target_project_from_qr}' aus dem QR-Code ist nicht aktiv oder existiert nicht."
-            )
+    projects = df_p_active["projekt_name"].dropna().astype(str).tolist()
+    default_index = projects.index(target_project) if (target_project in projects) else 0
+    project_name = st.selectbox("Projekt", projects, index=default_index)
 
-    project = st.selectbox("Projekt wählen", active_projects, index=default_index)
+    proj = df_p_active[df_p_active["projekt_name"] == project_name].tail(1)
+    projekt_id = str(proj.iloc[0]["projekt_id"]) if not proj.empty else project_name.replace(" ", "_")[:64]
 
-    t1, t2, t3 = st.tabs(["📝 Rapport", "📷 Fotos", "📂 Pläne"])
+    # QR
+    with st.expander("📱 QR-Code für dieses Projekt"):
+        png = project_qr_png(project_name)
+        st.image(png, caption="Scan → Projekt in App öffnen", width=250)
+        st.download_button("QR als PNG herunterladen", png, file_name=f"QR_{project_name}.png", mime="image/png")
 
-    # --- RAPPORT ---
-    with t1:
+    tab1, tab2, tab3 = st.tabs(["📝 Rapport", "🖊️ Wochen-Signatur", "📷 Fotos/📂 Pläne"])
+
+    # -------------------------
+    # Rapport
+    # -------------------------
+    with tab1:
         st.subheader("Rapport erfassen")
+
         c1, c2, c3 = st.columns(3)
+        datum = c1.date_input("Datum", date.today())
+        mitarbeiter = c1.text_input("Name")
+        start = c2.time_input("Start", time(7, 0))
+        ende = c2.time_input("Ende", time(16, 0))
+        pause_h = c3.number_input("Pause (h)", 0.0, 5.0, 0.5, 0.25)
 
-        date_val = c1.date_input("Datum", datetime.now())
-        ma_val = c1.text_input("Name")
-        start_val = c2.time_input("Start", time(7, 0))
-        end_val = c2.time_input("Ende", time(16, 0))
-        pause_val = c3.number_input("Pause (h)", 0.0, 5.0, 0.5, 0.25)
-        mat_val = c3.text_input("Material")
-        rem_val = st.text_area("Bemerkung")
+        arbeitsbeschrieb = st.text_area("Arbeitsbeschrieb / Notizen")
+        material = st.text_input("Material")
+        fugenfarbe = st.text_input("Fugenfarbe (optional)")
+        fugen_code = st.text_input("Fugen-Code (optional)")
+        asbest_relevant = st.checkbox("Asbest relevant?")
+        asbest_probe = st.checkbox("Asbest Probe genommen?")
 
-        dt_start = datetime.combine(datetime.today(), start_val)
-        dt_end = datetime.combine(datetime.today(), end_val)
-        if dt_end < dt_start:
-            dt_end += timedelta(days=1)
+        hours = compute_hours(start, ende, pause_h)
+        st.info(f"Stunden (berechnet): {hours}")
 
-        dur = round(max(0.0, (dt_end - dt_start).total_seconds() / 3600 - pause_val), 2)
-        st.info(f"Stunden: {dur}")
-
-        if st.button("✅ Speichern", type="primary"):
-            if not ma_val.strip():
+        if st.button("✅ Als DRAFT speichern", type="primary"):
+            if not mitarbeiter.strip():
                 st.error("Name fehlt.")
             else:
-                ok = save_report(
-                    project,
-                    {
-                        "Datum": str(date_val),
-                        "Projekt": project,
-                        "Mitarbeiter": ma_val.strip(),
-                        "Start": str(start_val),
-                        "Ende": str(end_val),
-                        "Pause_h": pause_val,
-                        "Stunden": dur,
-                        "Material": mat_val,
-                        "Bemerkung": rem_val,
-                    },
-                )
-                if ok:
-                    st.success("Gespeichert!")
-                    sys_time.sleep(0.3)
-                    st.rerun()
-                else:
-                    st.error("Speichern fehlgeschlagen (Drive). Bitte erneut versuchen.")
+                row = {
+                    "rapport_id": secrets.token_hex(16),
+                    "version": 1,
+                    "status": "DRAFT",
+                    "created_at": now_utc_iso(),
+                    "created_by": mitarbeiter.strip(),
+                    "confirmed_at": None,
+                    "confirmed_by": None,
+                    "datum": str(datum),
+                    "projekt_id": projekt_id,
+                    "projekt_name": project_name,
+                    "mitarbeiter_name": mitarbeiter.strip(),
+                    "gast_info": None,
+                    "start_time": str(start),
+                    "end_time": str(ende),
+                    "pause_h": float(pause_h),
+                    "reisezeit_min": None,
+                    "mittag": None,
+                    "arbeitsbeschrieb": arbeitsbeschrieb,
+                    "material": material,
+                    "material_regie": None,
+                    "fugenfarbe": fugenfarbe,
+                    "fugen_code": fugen_code,
+                    "asbest_relevant": bool(asbest_relevant),
+                    "asbest_probe_genommen": bool(asbest_probe),
+                    "hours": hours,
+                    "correction_reason": None,
+                }
+                df_r = pd.concat([df_r, pd.DataFrame([row])], ignore_index=True)
+                save_table(REPORTS_FILE, df_r, rid)
+                st.success("Gespeichert.")
+                st.rerun()
 
         st.divider()
-
-        cA, cB = st.columns([0.7, 0.3])
-        cA.subheader("📌 Rapporte im Projekt (aktuell)")
-        if cB.button("🔄 Bericht aktualisieren", key="refresh_reports_emp"):
-            st.rerun()
-
-        df_h, _ = get_reports_df(project)
-        if df_h.empty:
-            st.info("Noch keine Rapporte für dieses Projekt vorhanden.")
+        st.subheader("Rapporte (Projekt)")
+        view = df_r[df_r["projekt_id"] == projekt_id].copy()
+        if view.empty:
+            st.info("Noch keine Rapporte.")
         else:
-            try:
-                df_view = df_h.copy()
-                df_view["Datum"] = pd.to_datetime(df_view["Datum"], errors="coerce")
-                df_view = df_view.sort_values(["Datum"], ascending=False)
-            except Exception:
-                df_view = df_h
-            st.dataframe(df_view.tail(50), use_container_width=True)
+            view["datum"] = pd.to_datetime(view["datum"], errors="coerce")
+            view = view.sort_values(["datum", "created_at"], ascending=False)
+            st.dataframe(view.tail(200), use_container_width=True)
 
-    # --- FOTOS ---
-    with t2:
-        st.subheader("Fotos")
+    # -------------------------
+    # Wochen-Signatur
+    # -------------------------
+    with tab2:
+        st.subheader("Wochen-Signatur")
 
-        cloudrun_upload_widget(
-            project=project,
-            bucket="photos",
-            title="Foto(s) hochladen",
-            help_text="Nur Bilder (Kamera/Galerie).",
-            accept="image/*",
-            multiple=True,
-            height=240,
-        )
+        df_proj = df_r[(df_r["projekt_id"] == projekt_id) & df_r["datum"].notna()].copy()
+        if df_proj.empty:
+            st.info("Keine Rapporte vorhanden.")
+            st.stop()
 
-        if st.button("🔄 Fotos aktualisieren", key="refresh_photos_emp"):
-            st.rerun()
+        df_proj["datum"] = pd.to_datetime(df_proj["datum"], errors="coerce").dt.date
+        df_proj["week_id"] = df_proj["datum"].apply(week_id_from_date)
 
-        files = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
-        proj_photos = [x for x in files if x["name"].startswith(project + "_")][:60]
+        week = st.selectbox("Woche", sorted(df_proj["week_id"].dropna().unique().tolist(), reverse=True))
 
-        if not proj_photos:
-            st.info("Keine Fotos vorhanden.")
+        wk_rows = df_proj[df_proj["week_id"] == week].copy()
+        confirmed = wk_rows[wk_rows["status"] == "CONFIRMED"].copy()
+
+        if confirmed.empty:
+            st.warning("Diese Woche ist noch nicht READY_TO_SIGN (keine CONFIRMED Rapporte).")
         else:
-            for f in proj_photos:
-                with st.expander(f"🖼️ {f['name']}", expanded=False):
-                    image_preview_from_drive(f["id"])
+            st.success(f"READY_TO_SIGN: {len(confirmed)} bestätigte Rapporte")
 
-    # --- PLÄNE / DOKUMENTE (DOWNLOAD) ---
-    with t3:
-        st.subheader("Pläne & Dokumente")
+        employee_key = st.text_input("Name (Signatur)", value="")
+        pin = st.text_input("PIN", type="password")
+        agree = st.checkbox("Ich bestätige die Richtigkeit der Angaben.")
 
-        if st.button("🔄 Pläne aktualisieren", key="refresh_docs_emp"):
-            st.rerun()
+        sig_hit = df_s[(df_s["week_id"] == week) & (df_s["employee_key"] == employee_key.strip())].tail(1)
+        if not sig_hit.empty and sig_hit.iloc[0]["status"] == "SIGNED":
+            st.info("Für diesen Namen ist die Woche bereits SIGNED.")
 
-        files = list_files(UPLOADS_FOLDER_ID)
-        proj_docs = [x for x in files if x["name"].startswith(project + "_")][:200]
+        if st.button("🖊️ Woche signieren", disabled=not (agree and employee_key.strip() and pin and not confirmed.empty)):
+            emp = employee_key.strip()
 
-        if not proj_docs:
-            st.info("Keine Dokumente hinterlegt.")
+            # optional PIN check, wenn employee in Employees.csv eingetragen ist
+            rec = df_e[df_e["employee_name"].fillna("").astype(str) == emp].tail(1)
+            if not rec.empty:
+                h = rec.iloc[0].get("pin_hash_bcrypt")
+                if h and not bcrypt_check_pin(pin, str(h)):
+                    st.error("PIN falsch.")
+                    st.stop()
+
+            signature_text = f"Signiert von {emp} via CHECKBOX+PIN am {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            pdf_bytes = generate_weekly_pdf(
+                company_name="R. BAUMGARTNER AG",
+                week_id=week,
+                employee_display=emp,
+                rows_df=confirmed,
+                signature_text=signature_text,
+            )
+
+            exports_folder = ensure_subfolder(drive, UPLOADS_FOLDER_ID, EXPORTS_SUBFOLDER_NAME)
+            pdf_name = f"Wochenrapport_{week}_{emp}.pdf".replace(" ", "_")
+            pdf_id = upload_bytes(drive, data=pdf_bytes, folder_id=exports_folder, filename=pdf_name, mimetype="application/pdf")
+
+            token = secrets.token_urlsafe(32)
+            htok = token_hash(token)
+
+            sig_row = {
+                "week_id": week,
+                "employee_key": emp,
+                "projekt_id": projekt_id,
+                "signed_at": now_utc_iso(),
+                "signed_by_display": emp,
+                "signature_method": "CHECKBOX_PIN",
+                "signature_image_file_id": None,
+                "pdf_file_id": pdf_id,
+                "status": "SIGNED",
+                "invalidated_at": None,
+                "invalidated_by": None,
+                "invalidation_reason": None,
+                "token_hash": htok,
+                "token_expires_at": (datetime.utcnow() + timedelta(days=14)).isoformat(timespec="seconds"),
+            }
+            df_s = pd.concat([df_s, pd.DataFrame([sig_row])], ignore_index=True)
+            save_table(WEEKLY_SIG_FILE, df_s, sid)
+
+            # optional send
+            sent = False
+            to_email = None
+            if not rec.empty:
+                to_email = rec.iloc[0].get("contact_email")
+
+            if ENABLE_GMAIL and gmail and to_email:
+                try:
+                    send_pdf_email(
+                        gmail_service=gmail,
+                        to=str(to_email),
+                        subject=f"Wochenrapport {week} – Kopie",
+                        body=f"Hallo {emp},\n\nanbei deine Kopie des unterschriebenen Wochenrapports ({week}).\n\nGruss\nBauApp",
+                        pdf_bytes=pdf_bytes,
+                        filename=pdf_name
+                    )
+                    sent = True
+                except Exception as e:
+                    st.warning(f"E-Mail konnte nicht gesendet werden: {e}")
+
+            st.success("Signatur gespeichert und PDF archiviert.")
+            if sent:
+                st.success("E-Mail wurde versendet.")
+            else:
+                if BASE_APP_URL:
+                    link = f"{BASE_APP_URL}?download_token={token}"
+                    st.info("Kein Gmail-Versand (oder keine E-Mail hinterlegt). Token-Link:")
+                    st.code(link)
+                else:
+                    st.warning("Kein BASE_APP_URL gesetzt – kein Link möglich.")
+
+            st.download_button("⬇️ PDF jetzt herunterladen", pdf_bytes, file_name=pdf_name, mime="application/pdf")
+
+    # -------------------------
+    # Fotos / Pläne Upload
+    # -------------------------
+    with tab3:
+        st.subheader("Fotos & Pläne")
+
+        st.caption("Uploads werden in Drive gespeichert. Nichts wird gelöscht.")
+        kind = st.radio("Typ", ["Fotos", "Pläne"], horizontal=True)
+
+        folder = PHOTOS_FOLDER_ID if kind == "Fotos" else UPLOADS_FOLDER_ID
+        subfolder = ensure_subfolder(drive, folder, project_name.replace("/", "_")[:100])
+
+        up = st.file_uploader(f"{kind} hochladen", type=None, accept_multiple_files=True)
+        if up and st.button("⬆️ Upload starten"):
+            ok = 0
+            for f in up:
+                data = f.read()
+                name = f.name
+                mime = f.type or "application/octet-stream"
+                upload_bytes(drive, data=data, folder_id=subfolder, filename=name, mimetype=mime)
+                ok += 1
+            st.success(f"{ok} Datei(en) hochgeladen.")
+
+        st.divider()
+        st.subheader("Letzte Uploads")
+        files = list_files(drive, subfolder)[:30]
+        if not files:
+            st.info("Noch keine Dateien.")
         else:
-            for f in proj_docs:
-                d = download_bytes(f["id"])
-                if not d:
-                    continue
-                c1, c2 = st.columns([0.8, 0.2])
-                c1.write(f"📄 {f['name']}")
-                c2.download_button("⬇️ Download", d, file_name=f["name"])
-
+            for f in files:
+                st.write(f"• {f['name']}")
 
 # -------------------------
-# 🛠️ ADMIN
+# Admin
 # -------------------------
-elif mode == "🛠️ Admin":
+else:
     st.title("🛠️ Admin")
-
-    pin = st.text_input("PIN", type="password")
-    if pin != ADMIN_PIN:
+    pin = st.text_input("Admin PIN", type="password")
+    if not ADMIN_PIN or pin != ADMIN_PIN:
         st.stop()
 
-    st.success("Angemeldet")
+    (df_p, pid), (df_e, eid), (df_r, rid), (df_s, sid) = load_all_tables()
+    tab1, tab2, tab3, tab4 = st.tabs(["📌 Projekte", "👥 Mitarbeiter", "🧾 Rapporte", "📥 Import (Excel)"])
 
-    # 🔐 Admin-Verknüpfung (für Handy / Startbildschirm)
-    admin_link = f"{BASE_APP_URL}?mode=admin"
-    st.info(
-        "🔐 **Adminbereich als Verknüpfung speichern**\n\n"
-        f"👉 Öffne diesen Link: {admin_link}\n\n"
-        "• **iPhone (Safari):** Teilen → *Zum Home-Bildschirm*\n"
-        "• **Android (Chrome):** ⋮ → *Zum Startbildschirm hinzufügen*\n\n"
-        "⚠️ Zugriff nur mit Admin-PIN"
-    )
-    st.link_button("🔗 Admin-Link öffnen", admin_link)
-
-    tabA, tabB, tabC = st.tabs(["📌 Projekte", "📂 Uploads & Übersicht", "🧾 Rapporte"])
-
-
-    # --- Projekte ---
-    with tabA:
-        st.subheader("Projekte verwalten")
-        df_p, pid = get_projects_df()
+    # Projekte
+    with tab1:
+        st.subheader("Projekte")
+        st.dataframe(df_p, use_container_width=True)
 
         c1, c2 = st.columns([0.7, 0.3])
-        new_p = c1.text_input("Neues Projekt")
-
-        if c2.button("➕ Anlegen") and new_p.strip():
-            project_name = new_p.strip()
-            df_p = pd.concat(
-                [df_p, pd.DataFrame([{"Projekt": project_name, "Status": "aktiv"}])],
-                ignore_index=True,
-            )
-            save_projects_df(df_p, pid)
-
-            st.success(f"Projekt '{project_name}' angelegt.")
-
-            st.divider()
-            st.subheader(f"QR-Code für {project_name}")
-
-            qr_bytes = generate_project_qr(project_name)
-
-            col_qr1, col_qr2 = st.columns([0.3, 0.7])
-            col_qr1.image(qr_bytes, width=200, caption=f"Scan für {project_name}")
-
-            col_qr2.info("Diesen Code können Sie herunterladen und auf dem Rapport-Formular platzieren.")
-            col_qr2.download_button(
-                label="⬇️ QR-Code (.png) herunterladen",
-                data=qr_bytes,
-                file_name=f"QR_{project_name}.png",
-                mime="image/png",
-            )
-
-        if df_p.empty:
-            st.info("Noch keine Projekte.")
-        else:
-            st.markdown("---")
-            st.subheader("Projektliste")
-            st.dataframe(df_p, use_container_width=True)
-
-            st.divider()
-            st.subheader("Projekt Status ändern")
-            all_projs = df_p["Projekt"].tolist()
-            sel = st.selectbox("Projekt wählen", all_projs, key="admin_status_proj")
-            new_status = st.radio(
-                "Neuer Status",
-                ["aktiv", "archiviert"],
-                horizontal=True,
-                key="admin_status_radio",
-            )
-            if st.button("Status speichern", key="admin_save_status"):
-                df_p.loc[df_p["Projekt"] == sel, "Status"] = new_status
-                save_projects_df(df_p, pid)
-                st.success("Status geändert.")
+        new_name = c1.text_input("Neues Projekt (Name)")
+        new_id = c1.text_input("Projekt-ID (optional)", value="")
+        if c2.button("➕ Anlegen"):
+            if not new_name.strip():
+                st.error("Name fehlt.")
+            else:
+                pid_val = new_id.strip() or new_name.strip().replace(" ", "_")[:64]
+                row = {"projekt_id": pid_val, "projekt_name": new_name.strip(), "status": "aktiv"}
+                df_p = pd.concat([df_p, pd.DataFrame([row])], ignore_index=True)
+                save_table(PROJECTS_FILE, df_p, pid)
+                st.success("Projekt angelegt.")
                 st.rerun()
+
+    # Mitarbeiter
+    with tab2:
+        st.subheader("Mitarbeiter")
+        st.dataframe(df_e, use_container_width=True)
+
+        with st.form("add_emp"):
+            name = st.text_input("Name")
+            email = st.text_input("E-Mail (für Versand)")
+            rolle = st.selectbox("Rolle", ["STAMM", "TEMP_POOL"])
+            status = st.selectbox("Status", ["aktiv", "inaktiv"])
+            pin_plain = st.text_input("PIN (wird bcrypt-gehasht)", type="password")
+            ok = st.form_submit_button("Speichern")
+
+        if ok:
+            if not name.strip():
+                st.error("Name fehlt.")
+            else:
+                row = {
+                    "employee_id": None,
+                    "employee_name": name.strip(),
+                    "rolle": rolle,
+                    "status": status,
+                    "contact_email": email.strip() or None,
+                    "contact_phone": None,
+                    "pin_hash_bcrypt": bcrypt_hash_pin(pin_plain) if pin_plain else None,
+                }
+                df_e = pd.concat([df_e, pd.DataFrame([row])], ignore_index=True)
+                save_table(EMPLOYEES_FILE, df_e, eid)
+                st.success("Mitarbeiter gespeichert.")
+                st.rerun()
+
+    # Rapporte confirm / correction
+    with tab3:
+        st.subheader("Rapporte")
+        df_view = df_r.copy()
+        df_view["datum"] = pd.to_datetime(df_view["datum"], errors="coerce")
+        df_view = df_view.sort_values(["datum", "created_at"], ascending=False)
+        st.dataframe(df_view.tail(300), use_container_width=True)
 
         st.divider()
-        st.subheader("🖨️ Druckvorlage erstellen (Scan-Design)")
-
-        if not df_p.empty:
-            print_proj = st.selectbox("Projekt für Druck wählen", get_active_projects(), key="print_sel")
-            if st.button("Vorschau generieren", key="btn_preview"):
-                qrb = generate_project_qr(print_proj)
-                html_code = get_printable_html(print_proj, qrb)
-
-                st.components.v1.html(html_code, height=600, scrolling=True)
-                st.download_button(
-                    label="Druckdatei (.html) herunterladen",
-                    data=html_code,
-                    file_name=f"Rapport_{print_proj}.html",
-                    mime="text/html",
-                )
-
-    # --- Uploads & Übersicht ---
-    with tabB:
-        st.subheader("Uploads & Übersicht (wie Mitarbeiter, plus Löschen)")
-
-        projs_all = get_all_projects()
-        if not projs_all:
-            st.info("Erstelle zuerst ein Projekt.")
-            st.stop()
-
-        sel_p = st.selectbox("Projekt", projs_all, key="admin_sel_project_upload")
-
-        cX, cY = st.columns(2)
-
-        with cX:
-            st.markdown("### 📷 Fotos (Upload via Cloud Run)")
-            cloudrun_upload_widget(
-                project=sel_p,
-                bucket="photos",
-                title="Foto(s) hochladen",
-                help_text="Nur Bilder (Kamera/Galerie).",
-                accept="image/*",
-                multiple=True,
-                height=240,
-            )
-
-        with cY:
-            st.markdown("### 📄 Pläne/Dokumente (Upload direkt nach Drive)")
-            st.caption("Dieser Upload ist bewusst im Adminbereich (PC zuverlässig; Handy je nach Browser).")
-
-            admin_docs_files = st.file_uploader(
-                "Dokumente auswählen",
-                type=None,
-                accept_multiple_files=True,
-                key="admin_docs_uploader",
-            )
-
-            if st.button("📤 Dokument(e) speichern", type="primary", key="admin_docs_upload_btn"):
-                if not admin_docs_files:
-                    st.warning("Bitte zuerst Dokumente auswählen.")
-                else:
-                    ok_n = 0
-                    fail_n = 0
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    for f in admin_docs_files:
-                        try:
-                            data = f.getvalue()
-                            mime = getattr(f, "type", None) or "application/octet-stream"
-                            filename = f"{sel_p}_{ts}_{f.name}"
-                            if upload_bytes_to_drive(data, UPLOADS_FOLDER_ID, filename, mime):
-                                ok_n += 1
-                            else:
-                                fail_n += 1
-                        except Exception:
-                            fail_n += 1
-
-                    if fail_n == 0:
-                        st.success(f"✅ {ok_n} Datei(en) in Drive gespeichert.")
-                    else:
-                        st.warning(f"⚠️ {ok_n} ok, {fail_n} fehlgeschlagen.")
-
-                    sys_time.sleep(0.2)
-                    st.rerun()
-
-        st.divider()
-
-        tabF, tabD = st.tabs(["📷 Fotos – Übersicht", "📄 Pläne/Dokumente – Übersicht"])
-
-        with tabF:
-            c1, c2 = st.columns([0.7, 0.3])
-            c1.subheader("📷 Fotos – Vorschau")
-            if c2.button("🔄 Aktualisieren", key="admin_refresh_photos"):
-                st.rerun()
-
-            files_ph = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
-            admin_photos = [x for x in files_ph if x["name"].startswith(sel_p + "_")][:180]
-
-            if not admin_photos:
-                st.info("Keine Fotos vorhanden.")
-            else:
-                cols = st.columns(3)
-                for idx, f in enumerate(admin_photos):
-                    col = cols[idx % 3]
-                    with col:
-                        with st.expander(f"🖼️ {f['name']}", expanded=False):
-                            image_preview_from_drive(f["id"])
-                            if st.button("🗑 Foto löschen", key=f"adm_del_photo_{f['id']}"):
-                                delete_file(f["id"])
-                                st.success("Gelöscht.")
-                                sys_time.sleep(0.2)
-                                st.rerun()
-
-        with tabD:
-            c1, c2 = st.columns([0.7, 0.3])
-            c1.subheader("📄 Pläne/Dokumente – Download")
-            if c2.button("🔄 Aktualisieren", key="admin_refresh_docs"):
-                st.rerun()
-
-            files_docs = list_files(UPLOADS_FOLDER_ID)
-            admin_docs = [x for x in files_docs if x["name"].startswith(sel_p + "_")][:400]
-
-            if not admin_docs:
-                st.info("Keine Dokumente vorhanden.")
-            else:
-                for f in admin_docs:
-                    d = download_bytes(f["id"])
-                    if not d:
-                        continue
-                    a1, a2, a3 = st.columns([0.65, 0.2, 0.15])
-                    a1.write(f"📄 {f['name']}")
-                    a2.download_button("⬇️ Download", d, file_name=f["name"])
-                    if a3.button("🗑", key=f"adm_del_doc_{f['id']}"):
-                        delete_file(f["id"])
-                        st.success("Gelöscht.")
-                        sys_time.sleep(0.2)
-                        st.rerun()
-
-    # --- Rapporte ---
-    with tabC:
-        st.subheader("Rapporte ansehen")
-
-        projs = get_all_projects()
-        if not projs:
-            st.info("Keine Projekte vorhanden.")
-            st.stop()
-
-        sel_rp = st.selectbox("Projekt", projs, key="admin_sel_reports")
-        if st.button("🔄 Rapporte aktualisieren", key="admin_refresh_reports"):
+        st.markdown("### ✅ DRAFT bestätigen → CONFIRMED")
+        draft_ids = df_r[df_r["status"] == "DRAFT"]["rapport_id"].dropna().tolist()
+        sel = st.selectbox("DRAFT rapport_id", draft_ids) if draft_ids else None
+        if sel and st.button("CONFIRM"):
+            m = df_r["rapport_id"] == sel
+            df_r.loc[m, "status"] = "CONFIRMED"
+            df_r.loc[m, "confirmed_at"] = now_utc_iso()
+            df_r.loc[m, "confirmed_by"] = "ADMIN"
+            save_table(REPORTS_FILE, df_r, rid)
+            st.success("Bestätigt.")
             st.rerun()
 
-        df_r, _ = get_reports_df(sel_rp)
-        if df_r.empty:
-            st.info("Keine Rapporte vorhanden.")
-        else:
-            try:
-                df_view = df_r.copy()
-                df_view["Datum"] = pd.to_datetime(df_view["Datum"], errors="coerce")
-                df_view = df_view.sort_values(["Datum"], ascending=False)
-            except Exception:
-                df_view = df_r
+        st.divider()
+        st.markdown("### ✏️ Admin-Korrektur (neue Version, alte REPLACED)")
+        conf_ids = df_r[df_r["status"] == "CONFIRMED"]["rapport_id"].dropna().tolist()
+        sel2 = st.selectbox("CONFIRMED rapport_id", conf_ids) if conf_ids else None
+        reason = st.text_input("Korrekturgrund (Pflicht)")
+        if sel2 and st.button("Korrigieren"):
+            if not reason.strip():
+                st.error("Korrekturgrund fehlt.")
+                st.stop()
 
-            st.dataframe(df_view, use_container_width=True)
-            st.download_button(
-                "⬇️ Rapporte als CSV herunterladen",
-                df_view.to_csv(index=False).encode("utf-8"),
-                file_name=f"{sel_rp}_Reports.csv",
-            )
+            old = df_r[df_r["rapport_id"] == sel2].tail(1)
+            if old.empty:
+                st.error("Nicht gefunden.")
+                st.stop()
+
+            old_row = old.iloc[0].to_dict()
+
+            # alte Version markieren
+            df_r.loc[df_r["rapport_id"] == sel2, "status"] = "REPLACED"
+
+            # neue Version erzeugen
+            new_row = old_row.copy()
+            new_row["rapport_id"] = secrets.token_hex(16)
+            new_row["version"] = int(old_row.get("version", 1)) + 1
+            new_row["status"] = "CONFIRMED"
+            new_row["correction_reason"] = reason.strip()
+            new_row["created_at"] = now_utc_iso()
+            new_row["created_by"] = "ADMIN_CORRECTION"
+            new_row["confirmed_at"] = now_utc_iso()
+            new_row["confirmed_by"] = "ADMIN"
+
+            df_r = pd.concat([df_r, pd.DataFrame([new_row])], ignore_index=True)
+
+            # SIGNED invalidieren (falls existiert)
+            try:
+                d = pd.to_datetime(new_row.get("datum"), errors="coerce")
+                if pd.notna(d):
+                    wk = week_id_from_date(d.date())
+                    emp = str(new_row.get("mitarbeiter_name") or "").strip()
+                    if emp:
+                        hits = df_s[(df_s["week_id"] == wk) & (df_s["employee_key"] == emp) & (df_s["status"] == "SIGNED")]
+                        if not hits.empty:
+                            idx = hits.index
+                            df_s.loc[idx, "status"] = "SIGNED_INVALIDATED"
+                            df_s.loc[idx, "invalidated_at"] = now_utc_iso()
+                            df_s.loc[idx, "invalidated_by"] = "ADMIN"
+                            df_s.loc[idx, "invalidation_reason"] = f"Korrektur nach Signatur: {reason.strip()}"
+                            save_table(WEEKLY_SIG_FILE, df_s, sid)
+            except Exception:
+                pass
+
+            save_table(REPORTS_FILE, df_r, rid)
+            st.success("Korrigiert (neue Version erstellt, alte REPLACED).")
+            st.rerun()
+
+    # Import Excel
+    with tab4:
+        st.subheader("Import aus Excel → CSV Tabellen")
+        st.caption("Importiert Projects (Aufträge) und Reports (Baustellenrapporte).")
+
+        x_projects = st.file_uploader("Projektmanager Excel", type=["xlsx"])
+        x_reports = st.file_uploader("Rapporte Excel", type=["xlsx"])
+
+        if st.button("📥 Import starten"):
+            import openpyxl
+
+            # Projects Import
+            if x_projects:
+                wb = openpyxl.load_workbook(x_projects, data_only=True)
+                if "Aufträge" in wb.sheetnames:
+                    ws = wb["Aufträge"]
+                    headers = [ws.cell(5, c).value for c in range(1, 23)]
+                    rows = []
+                    for r in range(6, ws.max_row + 1):
+                        vals = [ws.cell(r, c).value for c in range(1, 23)]
+                        if all(v is None or v == "" for v in vals):
+                            continue
+                        rows.append(vals)
+                    dfA = pd.DataFrame(rows, columns=headers)
+
+                    dfA = dfA[dfA["Auftragsnr."].notna() & dfA["Objekt / Auftrag"].notna()]
+                    dfA["projekt_id"] = dfA["Auftragsnr."].apply(lambda v: str(int(v)) if str(v).replace(".0", "").isdigit() else str(v))
+                    dfA["projekt_name"] = dfA["Objekt / Auftrag"].astype(str)
+                    dfA["status"] = "aktiv"
+                    df_imp = dfA[["projekt_id", "projekt_name", "status"]].drop_duplicates()
+
+                    df_p = pd.concat([df_p, df_imp], ignore_index=True).drop_duplicates(subset=["projekt_id"], keep="last")
+                    df_p = ensure_projects(df_p)
+                    save_table(PROJECTS_FILE, df_p, pid)
+                    st.success(f"Projects importiert: {len(df_imp)}")
+
+            # Reports Import
+            if x_reports:
+                wb = openpyxl.load_workbook(x_reports, data_only=True)
+                if "Baustellenrapporte" in wb.sheetnames:
+                    ws = wb["Baustellenrapporte"]
+                    headers = [ws.cell(4, c).value for c in range(1, 19)]
+                    data = []
+                    for r in range(5, ws.max_row + 1):
+                        vals = [ws.cell(r, c).value for c in range(1, 19)]
+                        if all(v is None or v == "" for v in vals):
+                            continue
+                        data.append(vals)
+                    dfB = pd.DataFrame(data, columns=headers)
+
+                    def _to_date(x):
+                        if isinstance(x, datetime):
+                            return x.date()
+                        if isinstance(x, date):
+                            return x
+                        try:
+                            return pd.to_datetime(x, errors="coerce").date()
+                        except Exception:
+                            return None
+
+                    out_rows = []
+                    for _, r in dfB.iterrows():
+                        auftrag = r.get("Auftrag\nerfasst!!")
+                        baustelle = r.get("Baustelle")
+                        ma = r.get("MA")
+                        dat = _to_date(r.get("Datum"))
+                        von = r.get("Von")
+                        bis = r.get("Bis")
+                        pause = r.get("Pause") or r.get("Pause\nVorm. + Pause\nNachm.")
+                        notiz = r.get("Notizen/Spezieles")
+
+                        if pd.isna(auftrag) or not baustelle or not ma or not dat:
+                            continue
+
+                        pid_val = str(int(auftrag)) if str(auftrag).replace(".0", "").isdigit() else str(auftrag)
+                        start_t = pd.to_datetime(str(von), errors="coerce").time() if von else time(7, 0)
+                        end_t = pd.to_datetime(str(bis), errors="coerce").time() if bis else time(16, 0)
+                        pause_h = float(pause) if pause not in (None, "", " ") else 0.0
+                        hours = compute_hours(start_t, end_t, pause_h)
+
+                        out_rows.append({
+                            "rapport_id": secrets.token_hex(16),
+                            "version": 1,
+                            "status": "CONFIRMED",
+                            "created_at": now_utc_iso(),
+                            "created_by": "IMPORT",
+                            "confirmed_at": now_utc_iso(),
+                            "confirmed_by": "IMPORT",
+                            "datum": str(dat),
+                            "projekt_id": pid_val,
+                            "projekt_name": str(baustelle),
+                            "mitarbeiter_name": str(ma),
+                            "gast_info": None,
+                            "start_time": str(start_t),
+                            "end_time": str(end_t),
+                            "pause_h": pause_h,
+                            "reisezeit_min": None,
+                            "mittag": None,
+                            "arbeitsbeschrieb": str(notiz) if notiz else "",
+                            "material": "",
+                            "material_regie": None,
+                            "fugenfarbe": "",
+                            "fugen_code": "",
+                            "asbest_relevant": False,
+                            "asbest_probe_genommen": False,
+                            "hours": hours,
+                            "correction_reason": None,
+                        })
+
+                    if out_rows:
+                        df_r = pd.concat([df_r, pd.DataFrame(out_rows)], ignore_index=True)
+                        df_r = ensure_reports(df_r)
+                        save_table(REPORTS_FILE, df_r, rid)
+                        st.success(f"Reports importiert: {len(out_rows)}")
+
+            st.info("Import abgeschlossen.")
+            st.rerun()
