@@ -1280,7 +1280,8 @@ elif mode == "🛠️ Admin":
                 df_r2 = df_r.copy()
                 df_r2["Datum_dt"] = pd.to_datetime(df_r2["Datum"], errors="coerce").dt.date
                 df_r2["Stunden_num"] = pd.to_numeric(df_r2["Stunden"], errors="coerce").fillna(0.0)
-                df_r2["Reise_num"] = pd.to_numeric(df_r2.get("Reisezeit_h", 0.0), errors="coerce").fillna(0.0)
+                reise_series = df_r2["Reisezeit_h"] if "Reisezeit_h" in df_r2.columns else pd.Series([0.0] * len(df_r2))
+                df_r2["Reise_num"] = pd.to_numeric(reise_series, errors="coerce").fillna(0.0)
 
                 # 1) Baustellenrapporte-Layout (CSV)
                 st.markdown("### Export: Baustellenrapporte (CSV)")
