@@ -703,6 +703,13 @@ if mode == "👷 Mitarbeiter":
     )
     st.link_button("🔗 Mitarbeiter-Link öffnen", emp_link)
 
+    # 🛠️ Admin-Link (ohne embed) – damit der Admin-Bereich/Sidebar verfügbar ist
+    admin_link_public = f"{BASE_APP_URL}?mode=admin"
+    with st.expander("🛠️ Admin öffnen"):
+        st.write("Dieser Link öffnet die App **ohne** Embed-Modus. Danach kann im Admin-Bereich der Admin-PIN eingegeben werden.")
+        st.code(admin_link_public)
+        st.link_button("🔐 Admin-Link öffnen", admin_link_public)
+
     active_projects = get_active_projects()
     if not active_projects:
         st.warning("Keine aktiven Projekte.")
