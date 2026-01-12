@@ -388,7 +388,7 @@ def _hours_to_hhmm(hours: float) -> str:
     except Exception:
         return ""
 
-def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: str, day_rows: list[dict]) -> str:
+def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: str, project_meta: dict, day_rows: list[dict]) -> str:
     """Generiert eine druckbare Wochenrapport-HTML im Stil Scan_20260110.
     day_rows: Liste mit dicts je Tag:
       {date, ank, abd, travel_min, notes, material, total_work_h, total_travel_h, pause_h}
@@ -438,13 +438,41 @@ def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: s
         </div>
         """
 
+    
     blocks = "\n".join([day_block(r) for r in day_rows])
+
+    # Projektkopf (wie Papier-Rapport) – Stammdaten aus Projects.csv
+    pm = project_meta or {}
+    def _v(key: str) -> str:
+        return html.escape(str(pm.get(key, "") or "").strip())
+
+    proj_lines = []
+    if _v("Auftragsnr"):
+        proj_lines.append(f"<div class='pline'><span class='plbl'>Auftragsnr.</span><span class='pval'>{_v('Auftragsnr')}</span></div>")
+    if _v("Objekt"):
+        proj_lines.append(f"<div class='pline'><span class='plbl'>OBJEKT</span><span class='pval'>{_v('Objekt')}</span></div>")
+    if _v("Kunde"):
+        proj_lines.append(f"<div class='pline'><span class='plbl'>KUNDE</span><span class='pval'>{_v('Kunde')}</span></div>")
+    if _v("Telefon"):
+        proj_lines.append(f"<div class='pline'><span class='plbl'>TELEFON</span><span class='pval'>{_v('Telefon')}</span></div>")
+    if _v("Kontaktperson"):
+        proj_lines.append(f"<div class='pline'><span class='plbl'>KONTAKTPER.</span><span class='pval'>{_v('Kontaktperson')}</span></div>")
+    if _v("Kontakttelefon"):
+        proj_lines.append(f"<div class='pline'><span class='plbl'>TELEFON</span><span class='pval'>{_v('Kontakttelefon')}</span></div>")
+
+    project_header_html = ""
+    if proj_lines:
+        project_header_html = "<div class='projectbox'>" + "".join(proj_lines) + "</div>"
 
     css = """
     <style>
       body { font-family: Arial, Helvetica, sans-serif; color:#000; }
       .page { width: 100%; }
-      .header { display:flex; justify-content:space-between; align-items:flex-end; margin: 6px 0 12px; }
+      .header { display:flex; justify-content:space-between; align-items:flex-end; margin: 6px 0 8px; }
+      .projectbox { border: 1px solid #000; padding: 8px; margin: 0 0 12px; }
+      .pline { display:flex; gap:10px; margin: 3px 0; }
+      .plbl { width: 120px; font-size: 10px; font-weight: 700; letter-spacing: .2px; }
+      .pval { flex: 1; font-size: 12px; border-bottom: 1px solid #000; min-height: 16px; padding-bottom: 2px; }
       .title { font-weight:700; font-size: 18px; }
       .name { font-size: 12px; }
       .day { border: 1px solid #000; padding: 8px; margin: 10px 0; }
@@ -473,6 +501,7 @@ def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: s
           <div class="title">{html.escape(company_name)}</div>
           <div class="name"><b>NAME</b> {html.escape(employee_name)} &nbsp;&nbsp; <b>WOCHE</b> {html.escape(week_label)}</div>
         </div>
+        {project_header_html}
         {blocks}
       </div>
     </body></html>"""
@@ -1195,7 +1224,7 @@ if mode == "👷 Mitarbeiter":
                     "pause_h": pause_h,
                 })
 
-            html_week = get_weekly_rapport_html("R. BAUMGARTNER AG", str(ma_sel.get("Name","")), chosen_w, day_rows)
+            html_week = get_weekly_rapport_html("R. BAUMGARTNER AG", str(ma_sel.get("Name","")), chosen_w, get_project_record(project), day_rows)
             st.components.v1.html(html_week, height=900, scrolling=True)
             st.download_button("⬇️ Wochenrapport (.html) herunterladen", html_week, file_name=f"Wochenrapport_{project}_{ma_sel.get('EmployeeID','')}_{chosen_w}.html", mime="text/html")
         else:
