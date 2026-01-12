@@ -389,20 +389,40 @@ def _hours_to_hhmm(hours: float) -> str:
         return ""
 
 def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: str, project_meta: dict, day_rows: list[dict]) -> str:
-    """Generiert eine druckbare Wochenrapport-HTML im Stil Scan_20260110.
+    """Druckbarer Wochenrapport (Zeit + Reisezeit) ähnlich Scan_20260110 – aber mit
+    **Platz für bis zu 6 Baustellen pro Tag**.
+
     day_rows: Liste mit dicts je Tag:
-      {date, ank, abd, travel_min, notes, material, total_work_h, total_travel_h, pause_h}
+      {
+        date,
+        ank, abd,
+        total_work_h, total_travel_h, pause_h,
+        lines: [ {baustelle, work_h, travel_h}, ... ]  # max 6
+      }
     """
     def day_block(r: dict) -> str:
         d = _fmt_date(r.get("date",""))
         ank = _fmt_time(r.get("ank",""))
         abd = _fmt_time(r.get("abd",""))
         travel = str(r.get("travel_min","") or "")
-        notes_html = ""
-        material_html = ""
         total_work = _hours_to_hhmm(r.get("total_work_h", 0.0))
         total_travel = _hours_to_hhmm(r.get("total_travel_h", 0.0))
         pause = _hours_to_hhmm(r.get("pause_h", 0.0))
+
+        lines = r.get("lines", []) or []
+        # 6 Zeilen fix (leere Zeilen auffüllen)
+        padded = list(lines)[:6]
+        while len(padded) < 6:
+            padded.append({"baustelle": "", "work_h": "", "travel_h": ""})
+
+        rows_html = "".join(
+            [
+                f"<tr><td class='c-site'>{html.escape(str(x.get('baustelle','') or ''))}</td>"
+                f"<td class='c-work'>{html.escape(str(x.get('work_h','') or ''))}</td>"
+                f"<td class='c-travel'>{html.escape(str(x.get('travel_h','') or ''))}</td></tr>"
+                for x in padded
+            ]
+        )
 
         return f"""
         <div class="day">
@@ -413,13 +433,16 @@ def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: s
           </div>
 
           <div class="row mid">
-            <div class="big left">
-              <div class="box"><div class="val"></div></div>
-              <div class="box"><div class="val"></div></div>
-            </div>
-            <div class="big right">
-              <div class="box"><div class="val"></div></div>
-              <div class="box"><div class="val"></div></div>
+            <div class="lines">
+              <div class="lbl" style="margin-bottom:6px; font-weight:700;">Baustellen / Zeiten (max. 6)</div>
+              <table class="tlines">
+                <thead>
+                  <tr><th>Baustelle</th><th>Arbeitszeit</th><th>Reisezeit</th></tr>
+                </thead>
+                <tbody>
+                  {rows_html}
+                </tbody>
+              </table>
             </div>
 
             <div class="totals">
@@ -468,8 +491,12 @@ def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: s
       .w-date { flex: 1.1; }
       .w-small { flex: 1.2; }
       .mid { align-items:stretch; }
-      .big { flex: 3; display:flex; flex-direction:column; gap: 8px; }
-      .big .box { border:1px solid #000; min-height: 46px; padding: 6px; }
+      .lines { flex: 1; border: 1px solid #000; padding: 6px; }
+      .tlines { width:100%; border-collapse:collapse; font-size: 11px; }
+      .tlines th, .tlines td { border:1px solid #000; padding:4px 6px; vertical-align:top; }
+      .tlines th { font-weight:700; background:#fff; }
+      .c-site { width: 60%; }
+      .c-work, .c-travel { width: 20%; text-align:center; }
       .totals { width: 180px; display:flex; flex-direction:column; gap: 8px; }
       .tfield { border:1px solid #000; padding:6px; }
       @media print { .noprint { display:none; } }
@@ -1141,13 +1168,19 @@ if mode == "👷 Mitarbeiter":
         st.subheader("🖨️ Wochenrapport (Drucklayout wie Papier)")
 
         if ma_sel:
-            df_rp, _ = get_reports_df(project)
-            if not df_rp.empty:
-                df_tmp = df_rp.copy()
+            # Wochenrapport = ZEITERFASSUNG über ALLE Baustellen/Projekte (max. 6 Baustellen pro Tag im Layout)
+            # -> Wir lesen alle *_Reports.csv und filtern nach EmployeeID
+            emp_id = str(ma_sel.get("EmployeeID", "")).strip()
+            all_projs = get_all_projects()
+            frames = []
+            for p in all_projs:
+                dfr, _ = get_reports_df(p)
+                if dfr is not None and not dfr.empty:
+                    frames.append(dfr)
+            df_tmp = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            if not df_tmp.empty:
                 df_tmp["Datum_dt"] = pd.to_datetime(df_tmp["Datum"], errors="coerce").dt.date
-                df_tmp = df_tmp[df_tmp.get("EmployeeID","").astype(str) == str(ma_sel.get("EmployeeID","")).strip()]
-            else:
-                df_tmp = pd.DataFrame()
+                df_tmp = df_tmp[df_tmp.get("EmployeeID", "").astype(str).str.strip() == emp_id]
 
             # Wochenliste aus vorhandenen Daten + aktuelle Woche
             weeks = []
@@ -1179,12 +1212,36 @@ if mode == "👷 Mitarbeiter":
                 total_travel = float(pd.to_numeric(df_day.get("Reisezeit_h", 0), errors="coerce").fillna(0).sum()) if not df_day.empty else 0.0
                 pause_h = float(pd.to_numeric(df_day.get("Pause_h", 0), errors="coerce").fillna(0).sum()) if not df_day.empty else 0.0
 
-                # Notizen/Material je Tag zusammenfassen
-                notes = ""
-                material = ""
+                # Pro Tag bis zu 6 Baustellen (Projekt) ausgeben: Projekt/Baustelle + Arbeitszeit + Reisezeit
+                lines = []
                 if not df_day.empty:
-                    notes = "\n".join([str(x) for x in df_day.get("Bemerkung", "").fillna("").tolist() if str(x).strip()])
-                    material = "\n".join([str(x) for x in df_day.get("Material", "").fillna("").tolist() if str(x).strip()])
+                    df_lines = df_day.copy()
+                    df_lines["Stunden_num"] = pd.to_numeric(df_lines.get("Stunden", 0), errors="coerce").fillna(0.0)
+                    df_lines["Reise_num"] = pd.to_numeric(df_lines.get("Reisezeit_h", 0), errors="coerce").fillna(0.0)
+                    # pro Projekt summieren (wenn mehrere Einträge am selben Tag)
+                    try:
+                        grp = (
+                            df_lines.groupby("Projekt", dropna=False)[["Stunden_num", "Reise_num"]]
+                            .sum()
+                            .reset_index()
+                        )
+                    except Exception:
+                        grp = df_lines[["Projekt", "Stunden_num", "Reise_num"]]
+
+                    # Sortierung: meiste Arbeitszeit zuerst
+                    grp = grp.sort_values(["Stunden_num"], ascending=False)
+
+                    for _, rr in grp.head(6).iterrows():
+                        pname = str(rr.get("Projekt", "")).strip()
+                        lines.append({
+                            "project": pname,
+                            "work_h": float(rr.get("Stunden_num", 0.0) or 0.0),
+                            "travel_h": float(rr.get("Reise_num", 0.0) or 0.0),
+                        })
+
+                # auf 6 Zeilen auffüllen (für Drucklayout)
+                while len(lines) < 6:
+                    lines.append({"project": "", "work_h": 0.0, "travel_h": 0.0})
 
                 ank = ""
                 abd = ""
@@ -1202,16 +1259,20 @@ if mode == "👷 Mitarbeiter":
                     "ank": ank,
                     "abd": abd,
                     "travel_min": travel_min,
-                    "notes": notes,
-                    "material": material,
+                    "lines": lines,
                     "total_work_h": total_work,
                     "total_travel_h": total_travel,
                     "pause_h": pause_h,
                 })
 
-            html_week = get_weekly_rapport_html("R. BAUMGARTNER AG", str(ma_sel.get("Name","")), chosen_w, get_project_record(project), day_rows)
+            html_week = get_weekly_rapport_html("R. BAUMGARTNER AG", str(ma_sel.get("Name","")), chosen_w, {}, day_rows)
             st.components.v1.html(html_week, height=900, scrolling=True)
-            st.download_button("⬇️ Wochenrapport (.html) herunterladen", html_week, file_name=f"Wochenrapport_{project}_{ma_sel.get('EmployeeID','')}_{chosen_w}.html", mime="text/html")
+            st.download_button(
+                "⬇️ Wochenrapport (.html) herunterladen",
+                html_week,
+                file_name=f"Wochenrapport_{ma_sel.get('EmployeeID','')}_{chosen_w}.html",
+                mime="text/html",
+            )
         else:
             st.info("Bitte zuerst einen Mitarbeiter auswählen, um den Wochenrapport zu drucken.")
 
