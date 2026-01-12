@@ -768,18 +768,40 @@ def get_all_projects():
     return df["Projekt"].tolist()
 
 
-def get_project_record(project_name: str) -> dict:
-    df, _ = get_projects_df()
-    if df.empty:
+def get_project_record(project_name: str, projects_df: pd.DataFrame | None = None) -> dict:
+    """Return project master-data record from Projects.csv as a dict.
+
+    Accepts an optional preloaded projects_df for speed.
+    Always returns a dict with empty strings instead of None/NaN.
+    """
+    try:
+        df = projects_df
+        if df is None:
+            df, _ = get_projects_df()
+        if df is None or df.empty:
+            return {}
+
+        if "Projekt" not in df.columns:
+            return {}
+
+        hit = df[df["Projekt"].astype(str) == str(project_name)]
+        if hit.empty:
+            return {}
+
+        rec = hit.iloc[0].to_dict()
+
+        # Normalize missing values
+        for k in list(rec.keys()):
+            v = rec.get(k)
+            if v is None:
+                rec[k] = ""
+            else:
+                sv = str(v)
+                if sv.lower() == "nan":
+                    rec[k] = ""
+        return rec
+    except Exception:
         return {}
-    hit = df[df["Projekt"].astype(str) == str(project_name)]
-    if hit.empty:
-        return {}
-    row = hit.iloc[0].to_dict()
-    # normalize keys
-    for k in PROJECTS_COLS:
-        row.setdefault(k, "")
-    return row
 
 
 def get_reports_df(project_name: str):
