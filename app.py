@@ -398,10 +398,8 @@ def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: s
         ank = _fmt_time(r.get("ank",""))
         abd = _fmt_time(r.get("abd",""))
         travel = str(r.get("travel_min","") or "")
-        notes = html.escape(str(r.get("notes","") or ""))
-        material = html.escape(str(r.get("material","") or ""))
-        notes_html = notes.replace("\n","<br/>")
-        material_html = material.replace("\n","<br/>")
+        notes_html = ""
+        material_html = ""
         total_work = _hours_to_hhmm(r.get("total_work_h", 0.0))
         total_travel = _hours_to_hhmm(r.get("total_travel_h", 0.0))
         pause = _hours_to_hhmm(r.get("pause_h", 0.0))
@@ -416,11 +414,11 @@ def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: s
 
           <div class="row mid">
             <div class="big left">
-              <div class="box"><div class="val">{notes_html}</div></div>
+              <div class="box"><div class="val"></div></div>
               <div class="box"><div class="val"></div></div>
             </div>
             <div class="big right">
-              <div class="box"><div class="val">{material_html}</div></div>
+              <div class="box"><div class="val"></div></div>
               <div class="box"><div class="val"></div></div>
             </div>
 
@@ -443,26 +441,11 @@ def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: s
 
     # Projektkopf (wie Papier-Rapport) – Stammdaten aus Projects.csv
     pm = project_meta or {}
+    project_name_disp = html.escape(str(pm.get('Projekt','') or pm.get('Baustelle','') or '').strip())
     def _v(key: str) -> str:
         return html.escape(str(pm.get(key, "") or "").strip())
 
-    proj_lines = []
-    if _v("Auftragsnr"):
-        proj_lines.append(f"<div class='pline'><span class='plbl'>Auftragsnr.</span><span class='pval'>{_v('Auftragsnr')}</span></div>")
-    if _v("Objekt"):
-        proj_lines.append(f"<div class='pline'><span class='plbl'>OBJEKT</span><span class='pval'>{_v('Objekt')}</span></div>")
-    if _v("Kunde"):
-        proj_lines.append(f"<div class='pline'><span class='plbl'>KUNDE</span><span class='pval'>{_v('Kunde')}</span></div>")
-    if _v("Telefon"):
-        proj_lines.append(f"<div class='pline'><span class='plbl'>TELEFON</span><span class='pval'>{_v('Telefon')}</span></div>")
-    if _v("Kontaktperson"):
-        proj_lines.append(f"<div class='pline'><span class='plbl'>KONTAKTPER.</span><span class='pval'>{_v('Kontaktperson')}</span></div>")
-    if _v("Kontakttelefon"):
-        proj_lines.append(f"<div class='pline'><span class='plbl'>TELEFON</span><span class='pval'>{_v('Kontakttelefon')}</span></div>")
-
     project_header_html = ""
-    if proj_lines:
-        project_header_html = "<div class='projectbox'>" + "".join(proj_lines) + "</div>"
 
     css = """
     <style>
@@ -499,9 +482,8 @@ def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: s
       <div class="page">
         <div class="header">
           <div class="title">{html.escape(company_name)}</div>
-          <div class="name"><b>NAME</b> {html.escape(employee_name)} &nbsp;&nbsp; <b>WOCHE</b> {html.escape(week_label)}</div>
+          <div class="name"><b>NAME</b> {html.escape(employee_name)} &nbsp;&nbsp; <b>WOCHE</b> {html.escape(week_label)} &nbsp;&nbsp; <b>PROJEKT</b> {project_name_disp}</div>
         </div>
-        {project_header_html}
         {blocks}
       </div>
     </body></html>"""
@@ -1002,12 +984,15 @@ if mode == "👷 Mitarbeiter":
             emp_map = {emp_options[i]: df_emp_active.iloc[i].to_dict() for i in range(len(emp_options))}
             ma_key = c1.selectbox("Mitarbeiter", emp_options)
             ma_sel = emp_map.get(ma_key)
-        has_ank = c1.checkbox("Ankunft Magazin erfassen", value=False)
-        ank_mag = c1.time_input("Ankunft Magazin (Uhrzeit)", time(0, 0)) if has_ank else None
-        has_abd = c2.checkbox("Abfahrt Magazin erfassen", value=False)
-        abd_mag = c2.time_input("Abfahrt Magazin (Uhrzeit)", time(0, 0)) if has_abd else None
-        reise_min = c3.number_input("Reisezeit direkt (Min, optional)", 0, 600, 0, 5)
+            with st.expander("🚗 Fahrtzeiten / Magazinzeiten (optional)", expanded=False):
+                ec1, ec2, ec3 = st.columns(3)
+                has_ank = ec1.checkbox("Ankunft Magazin erfassen", value=False)
+                ank_mag = ec1.time_input("Ankunft Magazin (Uhrzeit)", time(0, 0)) if has_ank else None
+                has_abd = ec2.checkbox("Abfahrt Magazin erfassen", value=False)
+                abd_mag = ec2.time_input("Abfahrt Magazin (Uhrzeit)", time(0, 0)) if has_abd else None
+                reise_min = ec3.number_input("Reisezeit direkt (Min, optional)", 0, 600, 0, 5)
 
+        
         start_val = c2.time_input("Start", time(7, 0))
         end_val = c2.time_input("Ende", time(16, 0))
         pause_val = c3.number_input("Pause (h)", 0.0, 5.0, 0.5, 0.25)
