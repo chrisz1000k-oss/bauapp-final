@@ -360,6 +360,123 @@ def get_printable_html(project_name, qr_bytes):
     return html
 
 
+
+# =========================
+# WEEKLY RAPPORT (PRINT / SCAN_20260110 STYLE)
+# =========================
+def _fmt_time(val: str) -> str:
+    s = str(val or "").strip()
+    if s in ["", "nan", "NaT"]:
+        return ""
+    return s
+
+def _fmt_date(d) -> str:
+    try:
+        if hasattr(d, "strftime"):
+            return d.strftime("%d.%m.%Y")
+    except Exception:
+        pass
+    return str(d)
+
+def _hours_to_hhmm(hours: float) -> str:
+    try:
+        m = int(round(float(hours) * 60))
+        hh = m // 60
+        mm = m % 60
+        return f"{hh:02d}:{mm:02d}"
+    except Exception:
+        return ""
+
+def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: str, day_rows: list[dict]) -> str:
+    """Generiert eine druckbare Wochenrapport-HTML im Stil Scan_20260110.
+    day_rows: Liste mit dicts je Tag:
+      {date, ank, abd, travel_min, notes, material, total_work_h, total_travel_h, pause_h}
+    """
+    def day_block(r: dict) -> str:
+        d = _fmt_date(r.get("date",""))
+        ank = _fmt_time(r.get("ank",""))
+        abd = _fmt_time(r.get("abd",""))
+        travel = str(r.get("travel_min","") or "")
+        notes = html.escape(str(r.get("notes","") or ""))
+        material = html.escape(str(r.get("material","") or ""))
+        notes_html = notes.replace("\n","<br/>")
+        material_html = material.replace("\n","<br/>")
+        total_work = _hours_to_hhmm(r.get("total_work_h", 0.0))
+        total_travel = _hours_to_hhmm(r.get("total_travel_h", 0.0))
+        pause = _hours_to_hhmm(r.get("pause_h", 0.0))
+
+        return f"""
+        <div class="day">
+          <div class="row top">
+            <div class="field w-date"><div class="lbl">Datum</div><div class="val">{d}</div></div>
+            <div class="field w-small"><div class="lbl">Ankunft Magazin (Uhrzeit)</div><div class="val">{ank}</div></div>
+            <div class="field w-small"><div class="lbl">Reisezeit direkt (Dauer)</div><div class="val">{travel}</div></div>
+          </div>
+
+          <div class="row mid">
+            <div class="big left">
+              <div class="box"><div class="val">{notes_html}</div></div>
+              <div class="box"><div class="val"></div></div>
+            </div>
+            <div class="big right">
+              <div class="box"><div class="val">{material_html}</div></div>
+              <div class="box"><div class="val"></div></div>
+            </div>
+
+            <div class="totals">
+              <div class="tfield"><div class="lbl">Total Arbeitszeit</div><div class="val">{total_work}</div></div>
+              <div class="tfield"><div class="lbl">Total Reisezeit</div><div class="val">{total_travel}</div></div>
+              <div class="tfield"><div class="lbl">Pause</div><div class="val">{pause}</div></div>
+            </div>
+          </div>
+
+          <div class="row bottom">
+            <div class="field w-small"><div class="lbl">Abfahrt Magazin (Uhrzeit)</div><div class="val">{abd}</div></div>
+            <div class="field w-small"><div class="lbl">Reisezeit direkt (Dauer)</div><div class="val">{travel}</div></div>
+          </div>
+        </div>
+        """
+
+    blocks = "\n".join([day_block(r) for r in day_rows])
+
+    css = """
+    <style>
+      body { font-family: Arial, Helvetica, sans-serif; color:#000; }
+      .page { width: 100%; }
+      .header { display:flex; justify-content:space-between; align-items:flex-end; margin: 6px 0 12px; }
+      .title { font-weight:700; font-size: 18px; }
+      .name { font-size: 12px; }
+      .day { border: 1px solid #000; padding: 8px; margin: 10px 0; }
+      .row { display:flex; gap: 8px; align-items:stretch; }
+      .row.top { margin-bottom: 8px; }
+      .row.bottom { margin-top: 8px; justify-content:flex-end; }
+      .field { border:1px solid #000; padding:6px; }
+      .lbl { font-size: 10px; color:#333; margin-bottom: 4px; }
+      .val { font-size: 12px; min-height: 16px; }
+      .w-date { flex: 1.1; }
+      .w-small { flex: 1.2; }
+      .mid { align-items:stretch; }
+      .big { flex: 3; display:flex; flex-direction:column; gap: 8px; }
+      .big .box { border:1px solid #000; min-height: 46px; padding: 6px; }
+      .totals { width: 180px; display:flex; flex-direction:column; gap: 8px; }
+      .tfield { border:1px solid #000; padding:6px; }
+      @media print { .noprint { display:none; } }
+    </style>
+    """
+
+    return f"""<!doctype html>
+    <html><head><meta charset='utf-8'>{css}</head>
+    <body>
+      <div class="page">
+        <div class="header">
+          <div class="title">{html.escape(company_name)}</div>
+          <div class="name"><b>NAME</b> {html.escape(employee_name)} &nbsp;&nbsp; <b>WOCHE</b> {html.escape(week_label)}</div>
+        </div>
+        {blocks}
+      </div>
+    </body></html>"""
+
+
 # =========================
 # PROJECTS + REPORTS
 # =========================
@@ -1002,6 +1119,87 @@ if mode == "👷 Mitarbeiter":
                         st.error("Konnte Signatur nicht speichern (Drive).")
         else:
             st.info("Mitarbeiter auswählen, um eine Woche abzuschliessen.")
+
+
+
+        st.divider()
+        st.subheader("🖨️ Wochenrapport (Drucklayout wie Papier)")
+
+        if ma_sel:
+            df_rp, _ = get_reports_df(project)
+            if not df_rp.empty:
+                df_tmp = df_rp.copy()
+                df_tmp["Datum_dt"] = pd.to_datetime(df_tmp["Datum"], errors="coerce").dt.date
+                df_tmp = df_tmp[df_tmp.get("EmployeeID","").astype(str) == str(ma_sel.get("EmployeeID","")).strip()]
+            else:
+                df_tmp = pd.DataFrame()
+
+            # Wochenliste aus vorhandenen Daten + aktuelle Woche
+            weeks = []
+            if not df_tmp.empty and "Datum_dt" in df_tmp.columns:
+                for d in df_tmp["Datum_dt"].dropna().unique():
+                    yy, ww = iso_year_week(d)
+                    weeks.append((yy, ww))
+            today = datetime.now().date()
+            cy, cw = iso_year_week(today)
+            if (cy, cw) not in weeks:
+                weeks = [(cy, cw)] + weeks
+            weeks = sorted(set(weeks), reverse=True)
+
+            week_labels = [f"{yy}-KW{ww:02d}" for (yy, ww) in weeks] if weeks else [f"{cy}-KW{cw:02d}"]
+            chosen_w = st.selectbox("Kalenderwoche für Druck", week_labels, index=0, key="wk_print_sel")
+            yy = int(chosen_w.split("-KW")[0])
+            ww = int(chosen_w.split("-KW")[1])
+            w_start, w_end = week_date_range(yy, ww)
+
+            day_rows = []
+            for i in range(7):
+                d = (w_start + timedelta(days=i)).date()
+                if not df_tmp.empty:
+                    df_day = df_tmp[df_tmp["Datum_dt"] == d].copy()
+                else:
+                    df_day = pd.DataFrame()
+
+                total_work = float(pd.to_numeric(df_day.get("Stunden", 0), errors="coerce").fillna(0).sum()) if not df_day.empty else 0.0
+                total_travel = float(pd.to_numeric(df_day.get("Reisezeit_h", 0), errors="coerce").fillna(0).sum()) if not df_day.empty else 0.0
+                pause_h = float(pd.to_numeric(df_day.get("Pause_h", 0), errors="coerce").fillna(0).sum()) if not df_day.empty else 0.0
+
+                # Notizen/Material je Tag zusammenfassen
+                notes = ""
+                material = ""
+                if not df_day.empty:
+                    notes = "\n".join([str(x) for x in df_day.get("Bemerkung", "").fillna("").tolist() if str(x).strip()])
+                    material = "\n".join([str(x) for x in df_day.get("Material", "").fillna("").tolist() if str(x).strip()])
+
+                ank = ""
+                abd = ""
+                if not df_day.empty and "AnkunftMagazin" in df_day.columns:
+                    vals = [str(x).strip() for x in df_day["AnkunftMagazin"].fillna("").tolist() if str(x).strip()]
+                    ank = vals[0] if vals else ""
+                if not df_day.empty and "AbfahrtMagazin" in df_day.columns:
+                    vals = [str(x).strip() for x in df_day["AbfahrtMagazin"].fillna("").tolist() if str(x).strip()]
+                    abd = vals[-1] if vals else ""
+
+                travel_min = int(round(total_travel * 60))
+
+                day_rows.append({
+                    "date": d,
+                    "ank": ank,
+                    "abd": abd,
+                    "travel_min": travel_min,
+                    "notes": notes,
+                    "material": material,
+                    "total_work_h": total_work,
+                    "total_travel_h": total_travel,
+                    "pause_h": pause_h,
+                })
+
+            html_week = get_weekly_rapport_html("R. BAUMGARTNER AG", str(ma_sel.get("Name","")), chosen_w, day_rows)
+            st.components.v1.html(html_week, height=900, scrolling=True)
+            st.download_button("⬇️ Wochenrapport (.html) herunterladen", html_week, file_name=f"Wochenrapport_{project}_{ma_sel.get('EmployeeID','')}_{chosen_w}.html", mime="text/html")
+        else:
+            st.info("Bitte zuerst einen Mitarbeiter auswählen, um den Wochenrapport zu drucken.")
+
 
 
         st.divider()
