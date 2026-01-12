@@ -1234,14 +1234,14 @@ if mode == "👷 Mitarbeiter":
                     for _, rr in grp.head(6).iterrows():
                         pname = str(rr.get("Projekt", "")).strip()
                         lines.append({
-                            "project": pname,
+                            "baustelle": pname,
                             "work_h": float(rr.get("Stunden_num", 0.0) or 0.0),
                             "travel_h": float(rr.get("Reise_num", 0.0) or 0.0),
                         })
 
                 # auf 6 Zeilen auffüllen (für Drucklayout)
                 while len(lines) < 6:
-                    lines.append({"project": "", "work_h": 0.0, "travel_h": 0.0})
+                    lines.append({"baustelle": "", "work_h": 0.0, "travel_h": 0.0})
 
                 ank = ""
                 abd = ""
@@ -1619,6 +1619,20 @@ elif mode == "🛠️ Admin":
         if df_emp.empty:
             st.info("Noch keine Mitarbeiter vorhanden. Füge unten eine Zeile hinzu.")
             df_emp = pd.DataFrame(columns=EMPLOYEES_COLS)
+
+
+        # --- Streamlit data_editor ist streng bei Datentypen: daher hier normalisieren ---
+        df_emp = df_emp.copy()
+        for c in EMPLOYEES_COLS:
+            if c not in df_emp.columns:
+                df_emp[c] = ""
+        # Strings
+        for c in ["EmployeeID", "Name", "Rolle", "PIN", "Status"]:
+            df_emp[c] = df_emp[c].astype(str).replace("nan", "").fillna("").str.strip()
+        # Stundenlohn numerisch
+        df_emp["Stundenlohn"] = pd.to_numeric(df_emp["Stundenlohn"], errors="coerce").fillna(0.0)
+        # Status nur aktiv/inaktiv
+        df_emp["Status"] = df_emp["Status"].apply(lambda x: x if x in ["aktiv", "inaktiv"] else "aktiv")
 
         edited = st.data_editor(
             df_emp,
