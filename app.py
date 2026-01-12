@@ -364,11 +364,22 @@ def get_printable_html(project_name, qr_bytes):
 # PROJECTS + REPORTS
 # =========================
 PROJECTS_CSV_NAME = "Projects.csv"
-PROJECTS_COLS = ["Projekt", "Status", "Auftragsnr", "Objekt", "Kunde", "Telefon", "Kontaktperson", "Kontakttelefon"]
+PROJECTS_COLS = ["ProjektID", "Projekt", "Status", "Auftragsnr", "Objekt", "Kunde", "Telefon", "Kontaktperson", "Kontakttelefon"]
 RAPPORT_COLS = [
     "Datum",
     "Projekt",
+    "ProjektID",
+    "Auftragsnr",
+    "Objekt",
+    "Kunde",
+    "Telefon",
+    "Kontaktperson",
+    "Kontakttelefon",
+    "EmployeeID",
     "Mitarbeiter",
+    "AnkunftMagazin",
+    "AbfahrtMagazin",
+    "Reisezeit_h",
     "Start",
     "Ende",
     "Pause_h",
@@ -376,7 +387,6 @@ RAPPORT_COLS = [
     "Material",
     "Bemerkung",
 ]
-
 
 # =========================
 # EMPLOYEES + CLOSURES
@@ -387,6 +397,7 @@ EMPLOYEES_COLS = ["EmployeeID", "Name", "Rolle", "Stundenlohn", "PIN", "Status"]
 CLOSURES_CSV_NAME = "Closures.csv"
 CLOSURES_COLS = [
     "Projekt",
+    "ProjektID",
     "EmployeeID",
     "Mitarbeiter",
     "Jahr",
@@ -419,7 +430,21 @@ def get_projects_df():
     return pd.DataFrame(columns=PROJECTS_COLS), None
 
 
+def ensure_project_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure each project has a stable ProjektID."""
+    df = df.copy()
+    if "ProjektID" not in df.columns:
+        df["ProjektID"] = ""
+    for idx, row in df.iterrows():
+        name = str(row.get("Projekt", "")).strip()
+        pid = str(row.get("ProjektID", "")).strip()
+        if name and not pid:
+            df.at[idx, "ProjektID"] = str(uuid4())[:8]
+    return df
+
+
 def save_projects_df(df, file_id=None):
+    df = ensure_project_ids(df)
     csv_data = df.to_csv(index=False).encode("utf-8")
     if file_id:
         return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
@@ -440,6 +465,20 @@ def get_all_projects():
     if df.empty:
         return []
     return df["Projekt"].tolist()
+
+
+def get_project_record(project_name: str) -> dict:
+    df, _ = get_projects_df()
+    if df.empty:
+        return {}
+    hit = df[df["Projekt"].astype(str) == str(project_name)]
+    if hit.empty:
+        return {}
+    row = hit.iloc[0].to_dict()
+    # normalize keys
+    for k in PROJECTS_COLS:
+        row.setdefault(k, "")
+    return row
 
 
 def get_reports_df(project_name: str):
@@ -521,6 +560,56 @@ def append_closure(row: dict) -> bool:
     if fid:
         return update_file_in_drive(fid, csv_data, mimetype="text/csv")
     return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, CLOSURES_CSV_NAME, "text/csv")
+
+AZK_CSV_NAME = "AZK.csv"
+AZK_COLS = ["Jahr", "KW", "EmployeeID", "Mitarbeiter", "ProjektID", "Projekt", "TotalStunden", "TotalReisezeit_h", "Timestamp"]
+
+def get_azk_df():
+    files = list_files(REPORTS_FOLDER_ID)
+    csv_file = next((f for f in files if f["name"] == AZK_CSV_NAME), None)
+    if csv_file:
+        data = download_bytes(csv_file["id"])
+        if data:
+            df = pd.read_csv(io.BytesIO(data))
+            for c in AZK_COLS:
+                if c not in df.columns:
+                    df[c] = ""
+            df = df[AZK_COLS]
+            return df, csv_file["id"]
+    return pd.DataFrame(columns=AZK_COLS), None
+
+
+def upsert_azk_row(row: dict) -> bool:
+    """Upsert by (Jahr, KW, EmployeeID, ProjektID)."""
+    df, fid = get_azk_df()
+    df2 = pd.DataFrame([row])
+    for c in AZK_COLS:
+        if c not in df2.columns:
+            df2[c] = ""
+    df2 = df2[AZK_COLS]
+
+    if df.empty:
+        out = df2
+    else:
+        key_cols = ["Jahr", "KW", "EmployeeID", "ProjektID"]
+        # ensure types
+        for k in key_cols:
+            df[k] = df[k].astype(str)
+            df2[k] = df2[k].astype(str)
+        mask = (df["Jahr"] == str(row.get("Jahr"))) & (df["KW"] == str(row.get("KW"))) & (df["EmployeeID"] == str(row.get("EmployeeID"))) & (df["ProjektID"] == str(row.get("ProjektID")))
+        if mask.any():
+            # replace first match
+            idx = df[mask].index[0]
+            for c in AZK_COLS:
+                df.at[idx, c] = df2.iloc[0][c]
+            out = df
+        else:
+            out = pd.concat([df, df2], ignore_index=True)
+
+    csv_data = out.to_csv(index=False).encode("utf-8")
+    if fid:
+        return update_file_in_drive(fid, csv_data, mimetype="text/csv")
+    return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, AZK_CSV_NAME, "text/csv")
 
 
 def iso_year_week(d: datetime.date) -> tuple[int, int]:
@@ -727,6 +816,26 @@ if mode == "👷 Mitarbeiter":
 
     project = st.selectbox("Projekt wählen", active_projects, index=default_index)
 
+    # 🔎 Projekt-Stammdaten (wie Papier-Rapport) anzeigen
+    proj_rec = get_project_record(project)
+    if proj_rec:
+        lines = []
+        if str(proj_rec.get("Auftragsnr","")).strip():
+            lines.append(f"**Auftragsnr.:** {proj_rec.get('Auftragsnr')}")
+        if str(proj_rec.get("Objekt","")).strip():
+            lines.append(f"**Objekt:** {proj_rec.get('Objekt')}")
+        if str(proj_rec.get("Kunde","")).strip():
+            lines.append(f"**Kunde:** {proj_rec.get('Kunde')}")
+        if str(proj_rec.get("Telefon","")).strip():
+            lines.append(f"**Telefon:** {proj_rec.get('Telefon')}")
+        if str(proj_rec.get("Kontaktperson","")).strip():
+            lines.append(f"**Kontaktperson:** {proj_rec.get('Kontaktperson')}")
+        if str(proj_rec.get("Kontakttelefon","")).strip():
+            lines.append(f"**Kontakt-Tel.:** {proj_rec.get('Kontakttelefon')}")
+        if lines:
+            st.markdown("#### Projektdaten")
+            st.info(" · ".join(lines))
+
     t1, t2, t3 = st.tabs(["📝 Rapport", "📷 Fotos", "📂 Pläne"])
 
     # --- RAPPORT ---
@@ -775,6 +884,13 @@ if mode == "👷 Mitarbeiter":
                     {
                         "Datum": str(date_val),
                         "Projekt": project,
+                        "ProjektID": str(proj_rec.get("ProjektID","")).strip(),
+                        "Auftragsnr": str(proj_rec.get("Auftragsnr","")).strip(),
+                        "Objekt": str(proj_rec.get("Objekt","")).strip(),
+                        "Kunde": str(proj_rec.get("Kunde","")).strip(),
+                        "Telefon": str(proj_rec.get("Telefon","")).strip(),
+                        "Kontaktperson": str(proj_rec.get("Kontaktperson","")).strip(),
+                        "Kontakttelefon": str(proj_rec.get("Kontakttelefon","")).strip(),
                         "EmployeeID": str(ma_sel.get("EmployeeID","")).strip(),
                         "Mitarbeiter": str(ma_sel.get("Name","")).strip(),
                         "AnkunftMagazin": str(ank_mag) if ank_mag else "",
@@ -855,6 +971,7 @@ if mode == "👷 Mitarbeiter":
                     okc = append_closure(
                         {
                             "Projekt": project,
+                            "ProjektID": str(proj_rec.get("ProjektID","")).strip(),
                             "EmployeeID": str(ma_sel.get("EmployeeID","")).strip(),
                             "Mitarbeiter": str(ma_sel.get("Name","")).strip(),
                             "Jahr": y,
@@ -868,7 +985,19 @@ if mode == "👷 Mitarbeiter":
                         }
                     )
                     if okc:
-                        st.success("Woche abgeschlossen / signiert ✅")
+                        # AZK updaten (Arbeits- und Reisezeit pro MA/Woche/Projekt)
+                        _ = upsert_azk_row({
+                            "Jahr": str(y),
+                            "KW": str(w),
+                            "EmployeeID": str(ma_sel.get("EmployeeID","")).strip(),
+                            "Mitarbeiter": str(ma_sel.get("Name","")).strip(),
+                            "ProjektID": str(proj_rec.get("ProjektID","")).strip(),
+                            "Projekt": project,
+                            "TotalStunden": round(total_hours, 2),
+                            "TotalReisezeit_h": round(total_travel, 2),
+                            "Timestamp": datetime.now().isoformat(timespec="seconds"),
+                        })
+                        st.success("Woche abgeschlossen / signiert ✅ (AZK aktualisiert)")
                     else:
                         st.error("Konnte Signatur nicht speichern (Drive).")
         else:
@@ -1108,7 +1237,7 @@ elif mode == "🛠️ Admin":
 
         st.divider()
 
-        tabF, tabD = st.tabs(["📷 Fotos – Übersicht", "📄 Pläne/Dokumente – Übersicht"])
+        tabF, tabDocs = st.tabs(["📷 Fotos – Übersicht", "📄 Pläne/Dokumente – Übersicht"])
 
         with tabF:
             c1, c2 = st.columns([0.7, 0.3])
@@ -1134,7 +1263,7 @@ elif mode == "🛠️ Admin":
                                 sys_time.sleep(0.2)
                                 st.rerun()
 
-        with tabD:
+        with tabDocs:
             c1, c2 = st.columns([0.7, 0.3])
             c1.subheader("📄 Pläne/Dokumente – Download")
             if c2.button("🔄 Aktualisieren", key="admin_refresh_docs"):
