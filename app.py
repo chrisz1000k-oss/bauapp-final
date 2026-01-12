@@ -3,6 +3,7 @@ import os
 import re
 import time as sys_time
 import base64
+import html
 from datetime import datetime, time, timedelta
 from uuid import uuid4
 from urllib.parse import quote
@@ -1335,7 +1336,22 @@ elif mode == "🛠️ Admin":
         else:
             st.markdown("---")
             st.subheader("Projektliste")
-            st.dataframe(df_p, use_container_width=True)
+            st.caption("Projekt-Stammdaten hier pflegen (werden im Mitarbeiter-Rapport angezeigt).")
+            df_edit = st.data_editor(
+                df_p,
+                use_container_width=True,
+                num_rows="dynamic",
+                disabled=["ProjektID"] if "ProjektID" in df_p.columns else [],
+                key="proj_editor",
+            )
+            if st.button("💾 Projekte speichern", type="primary", key="btn_save_projects"):
+                ok = save_projects_df(df_edit, pid)
+                if ok:
+                    st.success("Projekte gespeichert ✅")
+                    sys_time.sleep(0.2)
+                    st.rerun()
+                else:
+                    st.error("Konnte Projects.csv nicht speichern (Drive).")
 
             st.divider()
             st.subheader("Projekt Status ändern")
