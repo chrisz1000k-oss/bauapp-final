@@ -362,6 +362,151 @@ def get_printable_html(project_name, qr_bytes):
 
 
 
+
+def get_arbeitsrapport_html_scan(project_name: str, proj_rec: dict, employee_name: str, date_str: str,
+                                notes: str, material: str, hours: float, qr_bytes: bytes | None) -> str:
+    """Drucklayout (HTML) im Stil Scan_20260107: Kopf mit Kundendaten + Arbeitsbeschrieb/Notizen + Material."""
+    # Safe values
+    def gv(k: str) -> str:
+        v = proj_rec.get(k, "") if proj_rec else ""
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    auftragsnr = gv("Auftragsnr")
+    objekt = gv("Objekt")
+    kunde = gv("Kunde")
+    tel = gv("Telefon")
+    kontakt = gv("Kontaktperson")
+    kontakt_tel = gv("Kontakttelefon")
+
+    emp = (employee_name or "").strip()
+    notes_s = (notes or "").strip()
+    mat_s = (material or "").strip()
+
+    # Escape for HTML
+    emp_h = html.escape(emp)
+    notes_h = html.escape(notes_s)
+    mat_h = html.escape(mat_s)
+    auftragsnr_h = html.escape(auftragsnr)
+    objekt_h = html.escape(objekt)
+    kunde_h = html.escape(kunde)
+    tel_h = html.escape(tel)
+    kontakt_h = html.escape(kontakt)
+    kontakt_tel_h = html.escape(kontakt_tel)
+    date_h = html.escape(date_str)
+
+    qr_b64 = base64.b64encode(qr_bytes).decode("utf-8") if qr_bytes else ""
+    qr_img = f'<img src="data:image/png;base64,{qr_b64}" />' if qr_b64 else ""
+
+    h = round(float(hours or 0.0), 2)
+    h_str = f"{h:.2f}".replace(".00", "")
+
+    # Lines area (like paper rows) – we print the first line with notes, rest empty
+    # Keep it simple: one filled line + 11 empty lines
+    row_html = []
+    if notes_h:
+        row_html.append(f"<tr><td class='col-desc filled'>{date_h} — {notes_h}</td><td class='col-mat'></td></tr>")
+    else:
+        row_html.append(f"<tr><td class='col-desc filled'>{date_h}</td><td class='col-mat'></td></tr>")
+    for _ in range(11):
+        row_html.append("<tr><td class='col-desc'></td><td class='col-mat'></td></tr>")
+    rows = "\n".join(row_html)
+
+    today_footer = datetime.now().strftime("%d.%m.%Y")
+
+    html_doc = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body {{ font-family: Arial, Helvetica, sans-serif; padding: 18px; font-size: 12px; color: #000; }}
+  .top {{ display:flex; justify-content: space-between; align-items:flex-start; }}
+  .title {{ font-size: 26px; font-weight: 800; letter-spacing: 0.5px; }}
+  .righttop {{ text-align:right; }}
+  .orderline {{ font-size: 14px; font-weight: 700; }}
+  .hoursbox {{ margin-top: 6px; border: 1px solid #000; width: 160px; float:right; }}
+  .hoursbox .lbl {{ font-size: 11px; padding: 4px 6px; border-bottom: 1px solid #000; text-transform: uppercase; }}
+  .hoursbox .val {{ padding: 8px 6px; font-size: 16px; font-weight: 800; text-align:center; }}
+  .infogrid {{ margin-top: 10px; display:grid; grid-template-columns: 1fr 130px; gap: 14px; }}
+  .lines {{ border-top: 2px solid #000; padding-top: 6px; }}
+  .line {{ display:flex; gap: 10px; border-bottom: 1px solid #000; padding: 4px 0; }}
+  .lab {{ width: 95px; font-weight: 700; text-transform: uppercase; font-size: 11px; }}
+  .val {{ flex:1; }}
+  .qrbox {{ border: 1px solid #000; width: 130px; height: 130px; display:flex; align-items:center; justify-content:center; }}
+  .qrbox img {{ width: 118px; height: 118px; }}
+  .checks {{ margin-top: 10px; border-top: 1px solid #000; padding-top: 6px; display:flex; justify-content: space-between; }}
+  .checkleft {{ width: 60%; }}
+  .checkrow {{ display:flex; align-items:center; gap:10px; border-bottom: 1px solid #ddd; padding: 4px 0; }}
+  .cb {{ width: 12px; height: 12px; border: 1px solid #000; display:inline-block; }}
+  .checklabel {{ width: 70px; font-weight:700; text-transform: uppercase; }}
+  .checkright {{ width: 35%; text-align:right; font-weight:700; }}
+  .sectiontitle {{ margin: 12px 0 6px; font-size: 14px; font-weight: 800; text-align:center; }}
+  table {{ width: 100%; border-collapse: collapse; }}
+  td {{ border-bottom: 1px dotted #999; padding: 6px 6px; vertical-align: top; }}
+  .col-desc {{ width: 70%; }}
+  .col-mat {{ width: 30%; }}
+  .filled {{ font-weight: 600; }}
+  .matbox {{ border:1px solid #000; height: 110px; padding: 8px; }}
+  .footer {{ margin-top: 16px; font-size: 11px; }}
+</style>
+</head>
+<body>
+  <div class="top">
+    <div class="title">R. BAUMGARTNER AG</div>
+    <div class="righttop">
+      <div class="orderline">Auftragsnr.&nbsp;&nbsp;<span style="font-weight:800">{auftragsnr_h}</span>&nbsp;&nbsp;&nbsp;&nbsp;RBAG</div>
+      <div class="hoursbox">
+        <div class="lbl">STUNDEN</div>
+        <div class="val">{h_str}</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="infogrid">
+    <div class="lines">
+      <div class="line"><div class="lab">OBJEKT</div><div class="val">{objekt_h}</div></div>
+      <div class="line"><div class="lab">KUNDE</div><div class="val">{kunde_h}</div></div>
+      <div class="line"><div class="lab">TELEFON</div><div class="val">{tel_h}</div></div>
+      <div class="line"><div class="lab">KONTAKTPER.</div><div class="val">{kontakt_h}</div></div>
+      <div class="line"><div class="lab">TELEFON</div><div class="val">{kontakt_tel_h}</div></div>
+      <div class="line"><div class="lab">NAME</div><div class="val">{emp_h}</div></div>
+      <div class="line"><div class="lab">DATUM</div><div class="val">{date_h}</div></div>
+    </div>
+    <div class="qrbox">{qr_img}</div>
+  </div>
+
+  <div class="checks">
+    <div class="checkleft">
+      <div class="checkrow"><div class="checklabel">CODE</div><span class="cb"></span></div>
+      <div class="checkrow"><div class="checklabel">MATERIAL</div><span class="cb"></span></div>
+      <div class="checkrow"><div class="checklabel">ASBEST</div><span class="cb"></span></div>
+    </div>
+    <div class="checkright">FUGENFARBEN<br/><span style="color:#777">ZEM. / SIL.</span></div>
+  </div>
+
+  <div class="sectiontitle">ARBEITSBESCHRIEB &amp; NOTIZEN</div>
+
+  <div style="display:grid; grid-template-columns: 1fr 260px; gap: 12px;">
+    <div>
+      <table>
+        {rows}
+      </table>
+    </div>
+    <div>
+      <div style="font-weight:700; text-align:center; margin-bottom:6px;">Material</div>
+      <div class="matbox">{mat_h}</div>
+      <div style="height:10px;"></div>
+      <div style="font-weight:700; text-align:center; border-top:1px solid #000; padding-top:6px;">MATERIAL REGIE</div>
+    </div>
+  </div>
+
+  <div class="footer">{today_footer}</div>
+</body>
+</html>"""
+    return html_doc
+
+
 # =========================
 # WEEKLY RAPPORT (PRINT / SCAN_20260110 STYLE)
 # =========================
@@ -1232,7 +1377,7 @@ if mode == "👷 Mitarbeiter":
                     grp = grp.sort_values(["Stunden_num"], ascending=False)
 
                     for _, rr in grp.head(6).iterrows():
-                        pname = str(rr.get("Projekt", "")).strip()
+                        pname = str(rr.get("Projekt", "")).strip() or project_name
                         lines.append({
                             "baustelle": pname,
                             "work_h": float(rr.get("Stunden_num", 0.0) or 0.0),
@@ -1296,6 +1441,61 @@ if mode == "👷 Mitarbeiter":
             except Exception:
                 df_view = df_h
             st.dataframe(df_view.tail(50), use_container_width=True)
+            # =========================
+            # 📄 Arbeitsrapport (Drucklayout wie Scan_20260107)
+            # =========================
+            st.markdown("### 🧾 Arbeitsrapport (Drucklayout wie Papier)")
+            st.caption("Für Kunden/Projekt: mit Kundendaten, Mitarbeiter, Material und Arbeitsbeschrieb (wie Scan_20260107). Fahrzeiten sind hier **nicht** nötig.")
+
+            work_date = st.date_input("Datum für Arbeitsrapport", value=date_val, key="workrapport_date")
+            if "Datum" in df_h.columns:
+                try:
+                    df_h["_Datum_dt"] = pd.to_datetime(df_h["Datum"], errors="coerce").dt.date
+                except Exception:
+                    df_h["_Datum_dt"] = None
+            else:
+                df_h["_Datum_dt"] = None
+
+            emp_name = str(ma_sel.get("Name", "")).strip() if isinstance(ma_sel, dict) else ""
+            if not emp_name:
+                emp_name = st.text_input("Mitarbeitername (für Druck)", value="", key="workrapport_empname")
+
+            df_day = df_h.copy()
+            if "_Datum_dt" in df_day.columns:
+                df_day = df_day[df_day["_Datum_dt"] == work_date]
+            if "Mitarbeiter" in df_day.columns and emp_name:
+                df_day = df_day[df_day["Mitarbeiter"].astype(str).str.strip().str.lower() == emp_name.lower()]
+
+            if df_day.empty:
+                st.info("Für dieses Datum (und Mitarbeiter) wurden noch keine Rapporte gefunden.")
+            else:
+                # Aggregation
+                hours = float(pd.to_numeric(df_day.get("Stunden", 0), errors="coerce").fillna(0).sum())
+                notes = " | ".join([str(x).strip() for x in df_day.get("Bemerkung", "").tolist() if str(x).strip() and str(x).strip().lower() != "none"])
+                material = " | ".join([str(x).strip() for x in df_day.get("Material", "").tolist() if str(x).strip() and str(x).strip().lower() != "none"])
+
+                proj_rec = get_project_record(project_name, projects_df)
+                qr_bytes = None
+                try:
+                    qr_bytes = generate_project_qr(project_name)
+                except Exception:
+                    qr_bytes = None
+
+                date_str = work_date.strftime("%d.%m.%Y")
+                html_work = get_arbeitsrapport_html_scan(project_name, proj_rec or {}, emp_name, date_str, notes, material, hours, qr_bytes)
+
+                # Preview
+                components.html(html_work, height=920, scrolling=True)
+
+                # Download (HTML)
+                fname = f"Arbeitsrapport_{project_name}_{date_str}.html".replace(" ", "_")
+                st.download_button(
+                    "⬇️ Arbeitsrapport (.html) herunterladen",
+                    data=html_work.encode("utf-8"),
+                    file_name=fname,
+                    mime="text/html",
+                )
+
 
     # --- FOTOS ---
     with t2:
