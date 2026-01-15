@@ -826,6 +826,19 @@ def get_reports_df(project_name: str):
     return pd.DataFrame(columns=RAPPORT_COLS), None
 
 
+def save_reports_df(project_name: str, df: 'pd.DataFrame', file_id: str | None) -> bool:
+    """Save full reports dataframe back to Drive (Admin editing)."""
+    df2 = df.copy()
+    for c in RAPPORT_COLS:
+        if c not in df2.columns:
+            df2[c] = '' if c not in ['Pause_h','Stunden','Reisezeit_h'] else 0.0
+    df2 = df2[RAPPORT_COLS]
+    csv_data = df2.to_csv(index=False).encode('utf-8')
+    if file_id:
+        return update_file_in_drive(file_id, csv_data, mimetype='text/csv')
+    return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, f"{project_name}_Reports.csv", 'text/csv')
+
+
 def save_report(project_name: str, row_dict: dict) -> bool:
     df, file_id = get_reports_df(project_name)
     df = pd.concat([df, pd.DataFrame([row_dict])], ignore_index=True)
@@ -1294,7 +1307,7 @@ if mode == "👷 Mitarbeiter":
             # Load reports for this project and employee
             df_r, _ = get_reports_df(project)
             if not df_r.empty:
-                df_r2 = df_r.copy()
+                df_r2 = edited_df.copy()
                 df_r2["Datum_dt"] = pd.to_datetime(df_r2["Datum"], errors="coerce").dt.date
                 df_r2 = df_r2[df_r2["EmployeeID"].astype(str) == str(ma_sel.get("EmployeeID","")).strip()]
 
@@ -1922,12 +1935,36 @@ elif mode == "🛠️ Admin":
             st.info("Keine Projekte vorhanden.")
         else:
             sel = st.selectbox("Projekt für Export", projs, key="exp_proj")
-            df_r, _ = get_reports_df(sel)
+            df_r, rep_file_id = get_reports_df(sel)
             if df_r.empty:
                 st.info("Keine Rapporte für dieses Projekt.")
             else:
+                st.markdown('### ✏️ Rapporte bearbeiten (vor Export)')
+                st.caption('Änderungen hier speichern -> aktualisiert die CSV in Google Drive. Danach Exporte herunterladen.')
+
+                # Editor
+                edited_df = st.data_editor(
+                    df_r,
+                    use_container_width=True,
+                    num_rows='dynamic',
+                    key=f'edit_reports_{sel}',
+                )
+
+                c1, c2 = st.columns([1, 3])
+                if c1.button('💾 Änderungen speichern', key=f'save_reports_{sel}'): 
+                    ok = save_reports_df(sel, edited_df, rep_file_id)
+                    if ok:
+                        st.success('Gespeichert ✅ (Drive aktualisiert)')
+                        sys_time.sleep(0.2)
+                        st.rerun()
+                    else:
+                        st.error('Speichern fehlgeschlagen (Drive).')
+
+                st.divider()
+
                 # Normalize types
-                df_r2 = df_r.copy()
+
+                df_r2 = edited_df.copy()
                 df_r2["Datum_dt"] = pd.to_datetime(df_r2["Datum"], errors="coerce").dt.date
                 df_r2["Stunden_num"] = pd.to_numeric(df_r2["Stunden"], errors="coerce").fillna(0.0)
                 reise_series = df_r2["Reisezeit_h"] if "Reisezeit_h" in df_r2.columns else pd.Series([0.0] * len(df_r2))
