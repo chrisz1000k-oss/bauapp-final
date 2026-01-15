@@ -680,6 +680,11 @@ RAPPORT_COLS = [
     "Mitarbeiter",
     "AnkunftMagazin",
     "AbfahrtMagazin",
+    "ReiseHomeToSiteMin",
+    "ReiseSiteToHomeMin",
+    "ReiseDirektMin",
+    "ReiseBezahltMin",
+    "ReiseRegel",
     "Reisezeit_h",
     "Start",
     "Ende",
@@ -1178,15 +1183,54 @@ if mode == "👷 Mitarbeiter":
             emp_map = {emp_options[i]: df_emp_active.iloc[i].to_dict() for i in range(len(emp_options))}
             ma_key = c1.selectbox("Mitarbeiter", emp_options)
             ma_sel = emp_map.get(ma_key)
-            with st.expander("🚗 Fahrtzeiten / Magazinzeiten (optional)", expanded=False):
-                ec1, ec2, ec3 = st.columns(3)
-                has_ank = ec1.checkbox("Ankunft Magazin erfassen", value=False)
-                ank_mag = ec1.time_input("Ankunft Magazin (Uhrzeit)", time(0, 0)) if has_ank else None
-                has_abd = ec2.checkbox("Abfahrt Magazin erfassen", value=False)
-                abd_mag = ec2.time_input("Abfahrt Magazin (Uhrzeit)", time(0, 0)) if has_abd else None
-                reise_min = ec3.number_input("Reisezeit direkt (Min, optional)", 0, 600, 0, 5)
+            # defaults (damit Variablen immer existieren)
+            ank_mag = None
+            abd_mag = None
+            reise_home_to_site_min = 0
+            reise_site_to_home_min = 0
+            reise_direkt_total_min = 0
+            reise_bezahlt_min = 0
+            reise_bezahlt_h = 0.0
+            reise_regel = "SPV: Bezahlt nur Direktfahrt Zuhause↔Baustelle; pro Richtung 30 Min Selbstbehalt. Magazinfahrten unbezahlt."
 
-        
+            with st.expander("🚗 Fahrtzeiten (SPV-konform)", expanded=False):
+                st.caption(
+                    "Regel: Magazin↔Baustelle ist **nicht** bezahlte Fahrtzeit. "
+                    "Bezahlt wird nur Direktfahrt Zuhause↔Baustelle, **pro Richtung minus 30 Min Selbstbehalt**."
+                )
+
+                ec1, ec2, ec3 = st.columns(3)
+
+                # Magazinzeiten nur als Info (nicht bezahlt)
+                has_ank = ec1.checkbox("Ankunft Magazin erfassen", value=False, key="ank_mag_chk")
+                ank_mag = ec1.time_input("Ankunft Magazin (Uhrzeit)", time(0, 0), key="ank_mag_time") if has_ank else None
+
+                has_abd = ec2.checkbox("Abfahrt Magazin erfassen", value=False, key="abd_mag_chk")
+                abd_mag = ec2.time_input("Abfahrt Magazin (Uhrzeit)", time(0, 0), key="abd_mag_time") if has_abd else None
+
+                # Direktfahrten (nur diese zählen)
+                reise_home_to_site_min = int(ec3.number_input("Direkt: Zuhause → Baustelle (Min)", 0, 600, 0, 5, key="reise_h2s_min"))
+                reise_site_to_home_min = int(ec3.number_input("Direkt: Baustelle → Zuhause (Min)", 0, 600, 0, 5, key="reise_s2h_min"))
+
+                reise_direkt_total_min = reise_home_to_site_min + reise_site_to_home_min
+
+                # 30 Min Selbstbehalt PRO RICHTUNG (nur wenn diese Richtung erfasst ist)
+                bezahlt_h2s = max(0, reise_home_to_site_min - 30) if reise_home_to_site_min > 0 else 0
+                bezahlt_s2h = max(0, reise_site_to_home_min - 30) if reise_site_to_home_min > 0 else 0
+
+                reise_bezahlt_min = bezahlt_h2s + bezahlt_s2h
+                reise_bezahlt_h = round(reise_bezahlt_min / 60.0, 2)
+
+                # Anzeige zur Kontrolle
+                if reise_direkt_total_min > 0:
+                    st.info(
+                        f"Direkt: H→B {reise_home_to_site_min} Min (bezahlt {bezahlt_h2s}), "
+                        f"B→H {reise_site_to_home_min} Min (bezahlt {bezahlt_s2h}) → "
+                        f"Bezahlt gesamt: {reise_bezahlt_min} Min (= {reise_bezahlt_h} h)"
+                    )
+                else:
+                    st.info("Keine Direktfahrt erfasst → bezahlte Fahrtzeit = 0")
+
         start_val = c2.time_input("Start", time(7, 0))
         end_val = c2.time_input("Ende", time(16, 0))
         pause_val = c3.number_input("Pause (h)", 0.0, 5.0, 0.5, 0.25)
@@ -1221,8 +1265,14 @@ if mode == "👷 Mitarbeiter":
                         "Mitarbeiter": str(ma_sel.get("Name","")).strip(),
                         "AnkunftMagazin": str(ank_mag) if ank_mag else "",
                         "AbfahrtMagazin": str(abd_mag) if abd_mag else "",
-                        "Reisezeit_h": round(float(reise_min) / 60.0, 2) if reise_min else 0.0,
-                        "Start": str(start_val),
+                        "ReiseHomeToSiteMin": int(reise_home_to_site_min),
+                        "ReiseSiteToHomeMin": int(reise_site_to_home_min),
+                        "ReiseDirektMin": int(reise_direkt_total_min),
+                        "ReiseBezahltMin": int(reise_bezahlt_min),
+                        "ReiseRegel": str(reise_regel),
+                        "Reisezeit_h": float(reise_bezahlt_h),
+
+"Start": str(start_val),
                         "Ende": str(end_val),
                         "Pause_h": pause_val,
                         "Stunden": dur,
@@ -1463,60 +1513,6 @@ if mode == "👷 Mitarbeiter":
             except Exception:
                 df_view = df_h
             st.dataframe(df_view.tail(50), use_container_width=True)
-            # =========================
-            # 📄 Arbeitsrapport (Drucklayout wie Scan_20260107)
-            # =========================
-            st.markdown("### 🧾 Arbeitsrapport (Drucklayout wie Papier)")
-            st.caption("Für Kunden/Projekt: mit Kundendaten, Mitarbeiter, Material und Arbeitsbeschrieb (wie Scan_20260107). Fahrzeiten sind hier **nicht** nötig.")
-
-            work_date = st.date_input("Datum für Arbeitsrapport", value=date_val, key="workrapport_date")
-            if "Datum" in df_h.columns:
-                try:
-                    df_h["_Datum_dt"] = pd.to_datetime(df_h["Datum"], errors="coerce").dt.date
-                except Exception:
-                    df_h["_Datum_dt"] = None
-            else:
-                df_h["_Datum_dt"] = None
-
-            emp_name = str(ma_sel.get("Name", "")).strip() if isinstance(ma_sel, dict) else ""
-            if not emp_name:
-                emp_name = st.text_input("Mitarbeitername (für Druck)", value="", key="workrapport_empname")
-
-            df_day = df_h.copy()
-            if "_Datum_dt" in df_day.columns:
-                df_day = df_day[df_day["_Datum_dt"] == work_date]
-            if "Mitarbeiter" in df_day.columns and emp_name:
-                df_day = df_day[df_day["Mitarbeiter"].astype(str).str.strip().str.lower() == emp_name.lower()]
-
-            if df_day.empty:
-                st.info("Für dieses Datum (und Mitarbeiter) wurden noch keine Rapporte gefunden.")
-            else:
-                # Aggregation
-                hours = float(pd.to_numeric(df_day.get("Stunden", 0), errors="coerce").fillna(0).sum())
-                notes = " | ".join([str(x).strip() for x in df_day.get("Bemerkung", "").tolist() if str(x).strip() and str(x).strip().lower() != "none"])
-                material = " | ".join([str(x).strip() for x in df_day.get("Material", "").tolist() if str(x).strip() and str(x).strip().lower() != "none"])
-
-                proj_rec = get_project_record(project_name, projects_df)
-                qr_bytes = None
-                try:
-                    qr_bytes = generate_project_qr(project_name)
-                except Exception:
-                    qr_bytes = None
-
-                date_str = work_date.strftime("%d.%m.%Y")
-                html_work = get_arbeitsrapport_html_scan(project_name, proj_rec or {}, emp_name, date_str, notes, material, hours, qr_bytes)
-
-                # Preview
-                components.html(html_work, height=920, scrolling=True)
-
-                # Download (HTML)
-                fname = f"Arbeitsrapport_{project_name}_{date_str}.html".replace(" ", "_")
-                st.download_button(
-                    "⬇️ Arbeitsrapport (.html) herunterladen",
-                    data=html_work.encode("utf-8"),
-                    file_name=fname,
-                    mime="text/html",
-                )
 
 
     # --- FOTOS ---
