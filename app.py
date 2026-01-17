@@ -1307,7 +1307,7 @@ if mode == "👷 Mitarbeiter":
             # Load reports for this project and employee
             df_r, _ = get_reports_df(project)
             if not df_r.empty:
-                df_r2 = df_r.copy()
+                df_r2 = edited_df.copy()
                 df_r2["Datum_dt"] = pd.to_datetime(df_r2["Datum"], errors="coerce").dt.date
                 df_r2 = df_r2[df_r2["EmployeeID"].astype(str) == str(ma_sel.get("EmployeeID","")).strip()]
 
