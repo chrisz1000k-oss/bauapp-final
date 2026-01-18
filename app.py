@@ -3,8 +3,9 @@ import os
 import re
 import time as sys_time
 import base64
-import html
-from datetime import datetime, time, timedelta
+import html as html_lib
+from dataclasses import dataclass
+from datetime import datetime, time, timedelta, date
 from uuid import uuid4
 from urllib.parse import quote
 
@@ -19,137 +20,142 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 
-# =========================
-# PAGE CONFIG / CHROME / LOGO
-# =========================
+# =========================================================
+# UI / PAGE
+# =========================================================
 st.set_page_config(page_title="BauApp", layout="wide")
 
-# Streamlit UI-Chrome so gut wie möglich ausblenden (für normale User).
-# Hinweis: Als Streamlit-Cloud-Owner am Desktop können Owner-Controls trotzdem sichtbar bleiben.
 st.markdown(
     """
     <style>
-    #MainMenu {display: none !important;}
-    [data-testid="stToolbar"] {display: none !important;}
-    [data-testid="stHeader"] {display: none !important;}
-    [data-testid="stStatusWidget"] {display: none !important;}
-    footer {display: none !important;}
+      #MainMenu {display: none !important;}
+      [data-testid="stToolbar"] {display: none !important;}
+      [data-testid="stHeader"] {display: none !important;}
+      [data-testid="stStatusWidget"] {display: none !important;}
+      footer {display: none !important;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Basis-URL Ihrer App (für QR-Codes) – NUR EINMAL
-BASE_APP_URL = "https://8bv6gzagymvrdgnm8wrtrq.streamlit.app"
+BASE_APP_URL = st.secrets.get("BASE_APP_URL", "").strip()
+# Falls nicht gesetzt: Streamlit setzt die korrekte URL sowieso für den Nutzer; QR-Codes brauchen sie aber fix.
+if not BASE_APP_URL:
+    # Fallback: funktionieren tut die App auch ohne – QR-Code-Link kann dann manuell ersetzt werden.
+    BASE_APP_URL = "https://REPLACE_WITH_YOUR_STREAMLIT_URL"
 
-# Logo – NUR EINMAL
+
 logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
 if os.path.exists(logo_path):
     st.sidebar.image(logo_path, use_container_width=True)
 
 
-# =========================
-# SECRETS (ROBUST)
-# =========================
-def sget(key: str, default: str = "") -> str:
+# =========================================================
+# SECRETS (robust + sauber)
+# =========================================================
+def _sget(key: str, default: str = "") -> str:
     try:
-        val = st.secrets.get(key, default)
-        return str(val).strip()
+        v = st.secrets.get(key, default)
+        return str(v).strip()
     except Exception:
         return default
 
 
-def require_secret(key: str) -> str:
-    val = sget(key, "")
-    if not val:
+def _require(key: str) -> str:
+    v = _sget(key, "")
+    if not v:
         st.error(f"Fehlendes Secret: {key}")
         st.stop()
-    return val
+    return v
 
 
-GOOGLE_CLIENT_ID = require_secret("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = require_secret("GOOGLE_CLIENT_SECRET")
-GOOGLE_REFRESH_TOKEN = require_secret("GOOGLE_REFRESH_TOKEN")
+GOOGLE_CLIENT_ID = _require("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = _require("GOOGLE_CLIENT_SECRET")
+GOOGLE_REFRESH_TOKEN = _require("GOOGLE_REFRESH_TOKEN")
 
-PHOTOS_FOLDER_ID = require_secret("PHOTOS_FOLDER_ID")
-UPLOADS_FOLDER_ID = require_secret("UPLOADS_FOLDER_ID")
-REPORTS_FOLDER_ID = require_secret("REPORTS_FOLDER_ID")
+# Neue saubere Keys
+PHOTOS_FOLDER_ID = _require("PHOTOS_FOLDER_ID")
+PLANS_FOLDER_ID = _sget("PLANS_FOLDER_ID", "")
+PROJECT_REPORTS_FOLDER_ID = _sget("PROJECT_REPORTS_FOLDER_ID", "")
+TIME_REPORTS_FOLDER_ID = _sget("TIME_REPORTS_FOLDER_ID", "")
 
-ADMIN_PIN = sget("ADMIN_PIN", "1234")
+# Backward kompatibel (falls du noch alte Keys drin hast)
+if not PLANS_FOLDER_ID:
+    PLANS_FOLDER_ID = _sget("UPLOADS_FOLDER_ID", "")
+if not PROJECT_REPORTS_FOLDER_ID:
+    PROJECT_REPORTS_FOLDER_ID = _sget("REPORTS_FOLDER_ID", "")
+if not TIME_REPORTS_FOLDER_ID:
+    # falls noch nicht getrennt: wenigstens funktionsfähig
+    TIME_REPORTS_FOLDER_ID = PROJECT_REPORTS_FOLDER_ID
 
-# Upload Service (Sektion [upload_service])
+if not PLANS_FOLDER_ID or not PROJECT_REPORTS_FOLDER_ID or not TIME_REPORTS_FOLDER_ID:
+    st.error(
+        "Fehlende Ordner-IDs: Bitte setze PLANS_FOLDER_ID, PROJECT_REPORTS_FOLDER_ID, TIME_REPORTS_FOLDER_ID "
+        "(oder als Fallback UPLOADS_FOLDER_ID / REPORTS_FOLDER_ID)."
+    )
+    st.stop()
+
+ADMIN_PIN = _sget("ADMIN_PIN", "1234")
+
 upload_section = st.secrets.get("upload_service")
 if not upload_section:
-    st.error("Fehler: Sektion [upload_service] fehlt in secrets.toml.")
+    st.error("Fehler: Sektion [upload_service] fehlt in secrets.")
     st.stop()
 
-try:
-    UPLOAD_SERVICE_URL = str(upload_section["url"]).strip().rstrip("/")
-    UPLOAD_SERVICE_TOKEN = str(upload_section["token"]).strip()
-except KeyError:
-    st.error("Fehler: In [upload_service] fehlen 'url' oder 'token'.")
-    st.stop()
+UPLOAD_SERVICE_URL = str(upload_section.get("url", "")).strip().rstrip("/")
+UPLOAD_SERVICE_TOKEN = str(upload_section.get("token", "")).strip()
 
 if not UPLOAD_SERVICE_URL or not UPLOAD_SERVICE_TOKEN:
-    st.error("Fehler: [upload_service] url/token leer.")
+    st.error("Fehler: [upload_service] url/token leer oder fehlt.")
     st.stop()
 
 
-# =========================
-# GOOGLE DRIVE CLIENT
-# =========================
+# =========================================================
+# GOOGLE DRIVE SERVICE
+# =========================================================
+@st.cache_resource(show_spinner=False)
 def get_drive_service():
-    try:
-        creds = Credentials(
-            token=None,
-            refresh_token=GOOGLE_REFRESH_TOKEN,
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=GOOGLE_CLIENT_ID,
-            client_secret=GOOGLE_CLIENT_SECRET,
-            scopes=["https://www.googleapis.com/auth/drive"],
-        )
-        if not creds.valid:
-            creds.refresh(Request())
-        return build("drive", "v3", credentials=creds)
-    except Exception as e:
-        st.error(f"Google Drive Auth Fehler: {e}")
-        st.stop()
+    creds = Credentials(
+        token=None,
+        refresh_token=GOOGLE_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        scopes=["https://www.googleapis.com/auth/drive"],
+    )
+    if not creds.valid:
+        creds.refresh(Request())
+    return build("drive", "v3", credentials=creds)
 
 
 drive = get_drive_service()
 
 
-# =========================
+# =========================================================
 # DRIVE HELPERS
-# =========================
-def list_files(folder_id: str, *, mime_prefix: str | None = None):
-    """
-    Listet Dateien im Ordner.
-    mime_prefix="image/" -> nur Bilder
-    mime_prefix=None -> alles
-    """
+# =========================================================
+def drive_list_files(folder_id: str, *, mime_contains: str | None = None, limit: int = 400) -> list[dict]:
     try:
         q = f"'{folder_id}' in parents and trashed=false"
-        if mime_prefix:
-            q += f" and mimeType contains '{mime_prefix}'"
-
+        if mime_contains:
+            q += f" and mimeType contains '{mime_contains}'"
         res = (
             drive.files()
             .list(
                 q=q,
-                pageSize=200,
-                fields="files(id,name,mimeType,createdTime)",
+                pageSize=min(limit, 1000),
+                fields="files(id,name,mimeType,createdTime,size)",
                 orderBy="createdTime desc",
             )
             .execute()
         )
         return res.get("files", [])
     except Exception as e:
-        st.error(f"Fehler beim Listen von Dateien: {e}")
+        st.error(f"Drive: Fehler beim Listen: {e}")
         return []
 
 
-def download_bytes(file_id: str):
+def drive_download_bytes(file_id: str) -> bytes | None:
     try:
         request = drive.files().get_media(fileId=file_id)
         fh = io.BytesIO()
@@ -162,823 +168,49 @@ def download_bytes(file_id: str):
         return None
 
 
-def upload_bytes_to_drive(data: bytes, folder_id: str, filename: str, mimetype: str):
+def drive_upload_bytes(data: bytes, folder_id: str, filename: str, mimetype: str) -> str | None:
     try:
-        file_metadata = {"name": filename, "parents": [folder_id]}
+        meta = {"name": filename, "parents": [folder_id]}
         media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=True)
-        drive.files().create(body=file_metadata, media_body=media, fields="id").execute()
-        return True
+        res = drive.files().create(body=meta, media_body=media, fields="id").execute()
+        return res.get("id")
     except Exception as e:
-        st.error(f"Upload Fehler: {e}")
-        return False
+        st.error(f"Drive: Upload Fehler: {e}")
+        return None
 
 
-def update_file_in_drive(file_id: str, data: bytes, mimetype: str = "text/csv"):
+def drive_update_file(file_id: str, data: bytes, mimetype: str = "text/csv") -> bool:
     try:
         media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=True)
         drive.files().update(fileId=file_id, media_body=media).execute()
         return True
     except Exception as e:
-        st.error(f"Update Fehler: {e}")
+        st.error(f"Drive: Update Fehler: {e}")
         return False
 
 
-def delete_file(file_id: str):
-    """Nur im Admin UI verwenden."""
+def drive_delete(file_id: str) -> bool:
     try:
         drive.files().delete(fileId=file_id).execute()
         return True
     except Exception as e:
-        st.error(f"Löschen Fehler: {e}")
+        st.error(f"Drive: Löschen Fehler: {e}")
         return False
 
 
-# =========================
-# QR CODE & PRINT TEMPLATE
-# =========================
-def generate_project_qr(project_name: str) -> bytes:
-    """
-    Erzeugt einen QR-Code, der direkt auf das Projekt verlinkt.
-    WICHTIG: embed=true, damit Mitarbeiter/Normalnutzer keine Cloud-Toolbar sehen.
-    """
-    safe_project = quote(project_name)
-    link = f"{BASE_APP_URL}?embed=true&project={safe_project}"
-
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
-        border=4,
-    )
-    qr.add_data(link)
-    qr.make(fit=True)
-
-    img = qr.make_image(fill_color="black", back_color="white")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def get_printable_html(project_name, qr_bytes):
-    """Erzeugt HTML im Design von R. BAUMGARTNER AG."""
-    qr_b64 = base64.b64encode(qr_bytes).decode("utf-8")
-    today_str = datetime.now().strftime("%d.%m.%Y")
-    empty_rows12 = "\n".join([
-        "                <tr>\n                    <td class=\"col-desc\"></td>\n                    <td class=\"col-mat\"></td>\n                </tr>"
-        for _ in range(12)
-    ])
-    empty_rows8 = "\n".join([
-        "                <tr>\n                    <td class=\"col-desc\"></td>\n                    <td class=\"col-mat\"></td>\n                </tr>"
-        for _ in range(8)
-    ])
-
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body {{ font-family: Arial, Helvetica, sans-serif; padding: 20px; font-size: 12px; color: black; }}
-
-            .header-top {{ display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 10px; }}
-            .company-name {{ font-size: 24px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }}
-            .order-info {{ font-weight: bold; font-size: 14px; }}
-
-            .info-grid {{ display: grid; grid-template-columns: 1fr 150px; gap: 20px; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 10px; }}
-            .info-lines {{ display: flex; flex-direction: column; gap: 8px; }}
-
-            .input-line {{ display: flex; align-items: flex-end; }}
-            .label {{ width: 100px; font-weight: bold; font-size: 11px; }}
-            .value {{ flex-grow: 1; border-bottom: 1px solid #000; padding-left: 5px; min-height: 18px; }}
-            .value-filled {{ font-weight: bold; font-size: 13px; }}
-
-            .qr-box {{ border: 1px solid #ccc; text-align: center; padding: 2px; height: 130px; display: flex; flex-direction: column; align-items: center; justify-content: center; }}
-            .qr-box img {{ width: 110px; height: 110px; }}
-            .qr-header {{ font-size: 10px; font-weight: bold; margin-bottom: 2px; text-transform: uppercase; }}
-
-            .check-section {{ margin-bottom: 15px; border-bottom: 1px solid #000; padding-bottom: 5px; }}
-            .check-header {{ text-align: right; font-size: 11px; font-weight: bold; margin-bottom: 2px; }}
-            .check-row {{ display: flex; justify-content: space-between; margin-bottom: 4px; border-bottom: 1px solid #eee; }}
-            .check-left {{ display: flex; align-items: center; }}
-            .check-label {{ width: 80px; font-size: 11px; }}
-            .check-box {{ width: 12px; height: 12px; border: 1px solid #000; margin-left: 10px; display: inline-block; }}
-            .check-right {{ font-size: 10px; color: #888; text-align: right; }}
-
-            .main-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; border: 1px solid #000; }}
-            .main-table th {{ border: 1px solid #000; padding: 5px; text-align: left; background-color: #fff; font-weight: bold; font-size: 12px; }}
-            .main-table td {{ border-right: 1px solid #000; height: 24px; vertical-align: bottom; }}
-
-            .col-desc {{ width: 70%; text-align: left; padding-left: 5px; border-bottom: 1px dotted #ccc; }}
-            .col-mat {{ width: 30%; border-bottom: 1px solid #000; }}
-
-            .footer-date {{ margin-top: 20px; font-size: 12px; }}
-
-            @media print {{
-                body {{ padding: 0; margin: 0; }}
-                button {{ display: none; }}
-            }}
-        </style>
-    </head>
-    <body>
-
-        <div class="header-top">
-            <div class="company-name">R. BAUMGARTNER AG</div>
-            <div class="order-info">Auftragsnr. ___________ &nbsp; RBAG ___________</div>
-        </div>
-
-        <div class="info-grid">
-            <div class="info-lines">
-                <div class="input-line">
-                    <span class="label">OBJEKT</span>
-                    <span class="value value-filled">{project_name}</span>
-                </div>
-                <div class="input-line">
-                    <span class="label">KUNDE</span>
-                    <span class="value"></span>
-                </div>
-                <div class="input-line">
-                    <span class="label">TELEFON</span>
-                    <span class="value"></span>
-                </div>
-                <div class="input-line" style="margin-top: 10px;">
-                    <span class="label">KONTAKTPER.</span>
-                    <span class="value"></span>
-                </div>
-                <div class="input-line">
-                    <span class="label">TELEFON</span>
-                    <span class="value"></span>
-                </div>
-            </div>
-
-            <div class="qr-box">
-                <div class="qr-header">STUNDEN / APP</div>
-                <img src="data:image/png;base64,{qr_b64}" />
-            </div>
-        </div>
-
-        <div class="check-section">
-            <div class="check-header">FUGENFARBEN</div>
-
-            <div class="check-row">
-                <div class="check-left"><span class="check-label">CODE</span> <span class="check-box"></span></div>
-                <div class="check-right">ZEM. / SIL.</div>
-            </div>
-            <div class="check-row">
-                <div class="check-left"><span class="check-label">MATERIAL</span> <span class="check-box"></span></div>
-                <div class="check-right">ZEM. / SIL.</div>
-            </div>
-            <div class="check-row">
-                <div class="check-left"><span class="check-label">ASBEST</span> <span class="check-box"></span></div>
-                <div class="check-right">ZEM. / SIL.</div>
-            </div>
-        </div>
-
-        <table class="main-table">
-            <thead>
-                <tr>
-                    <th class="col-desc" style="border-bottom: 1px solid #000;">ARBEITSBESCHRIEB & NOTIZEN</th>
-                    <th class="col-mat">Material</th>
-                </tr>
-            </thead>
-            <tbody>
-                {empty_rows12}
-
-                <tr>
-                    <td class="col-desc"></td>
-                    <td class="col-mat" style="text-align:center; font-weight:bold; font-size:10px; background-color:#f9f9f9; border-top: 2px solid #000; border-bottom: 1px solid #000;">MATERIAL REGIE</td>
-                </tr>
-
-                {empty_rows8}
-            </tbody>
-        </table>
-
-        <div class="footer-date">
-            {today_str}
-        </div>
-
-    </body>
-    </html>
-    """
-    return html
-
-
-
-
-def get_arbeitsrapport_html_scan(project_name: str, proj_rec: dict, employee_name: str, date_str: str,
-                                notes: str, material: str, hours: float, qr_bytes: bytes | None) -> str:
-    """Drucklayout (HTML) im Stil Scan_20260107: Kopf mit Kundendaten + Arbeitsbeschrieb/Notizen + Material."""
-    # Safe values
-    def gv(k: str) -> str:
-        v = proj_rec.get(k, "") if proj_rec else ""
-        if v is None:
-            return ""
-        return str(v).strip()
-
-    auftragsnr = gv("Auftragsnr")
-    objekt = gv("Objekt")
-    kunde = gv("Kunde")
-    tel = gv("Telefon")
-    kontakt = gv("Kontaktperson")
-    kontakt_tel = gv("Kontakttelefon")
-
-    emp = (employee_name or "").strip()
-    notes_s = (notes or "").strip()
-    mat_s = (material or "").strip()
-
-    # Escape for HTML
-    emp_h = html.escape(emp)
-    notes_h = html.escape(notes_s)
-    mat_h = html.escape(mat_s)
-    auftragsnr_h = html.escape(auftragsnr)
-    objekt_h = html.escape(objekt)
-    kunde_h = html.escape(kunde)
-    tel_h = html.escape(tel)
-    kontakt_h = html.escape(kontakt)
-    kontakt_tel_h = html.escape(kontakt_tel)
-    date_h = html.escape(date_str)
-
-    qr_b64 = base64.b64encode(qr_bytes).decode("utf-8") if qr_bytes else ""
-    qr_img = f'<img src="data:image/png;base64,{qr_b64}" />' if qr_b64 else ""
-
-    h = round(float(hours or 0.0), 2)
-    h_str = f"{h:.2f}".replace(".00", "")
-
-    # Lines area (like paper rows) – we print the first line with notes, rest empty
-    # Keep it simple: one filled line + 11 empty lines
-    row_html = []
-    if notes_h:
-        row_html.append(f"<tr><td class='col-desc filled'>{date_h} — {notes_h}</td><td class='col-mat'></td></tr>")
-    else:
-        row_html.append(f"<tr><td class='col-desc filled'>{date_h}</td><td class='col-mat'></td></tr>")
-    for _ in range(11):
-        row_html.append("<tr><td class='col-desc'></td><td class='col-mat'></td></tr>")
-    rows = "\n".join(row_html)
-
-    today_footer = datetime.now().strftime("%d.%m.%Y")
-
-    html_doc = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-<style>
-  body {{ font-family: Arial, Helvetica, sans-serif; padding: 18px; font-size: 12px; color: #000; }}
-  .top {{ display:flex; justify-content: space-between; align-items:flex-start; }}
-  .title {{ font-size: 26px; font-weight: 800; letter-spacing: 0.5px; }}
-  .righttop {{ text-align:right; }}
-  .orderline {{ font-size: 14px; font-weight: 700; }}
-  .hoursbox {{ margin-top: 6px; border: 1px solid #000; width: 160px; float:right; }}
-  .hoursbox .lbl {{ font-size: 11px; padding: 4px 6px; border-bottom: 1px solid #000; text-transform: uppercase; }}
-  .hoursbox .val {{ padding: 8px 6px; font-size: 16px; font-weight: 800; text-align:center; }}
-  .infogrid {{ margin-top: 10px; display:grid; grid-template-columns: 1fr 130px; gap: 14px; }}
-  .lines {{ border-top: 2px solid #000; padding-top: 6px; }}
-  .line {{ display:flex; gap: 10px; border-bottom: 1px solid #000; padding: 4px 0; }}
-  .lab {{ width: 95px; font-weight: 700; text-transform: uppercase; font-size: 11px; }}
-  .val {{ flex:1; }}
-  .qrbox {{ border: 1px solid #000; width: 130px; height: 130px; display:flex; align-items:center; justify-content:center; }}
-  .qrbox img {{ width: 118px; height: 118px; }}
-  .checks {{ margin-top: 10px; border-top: 1px solid #000; padding-top: 6px; display:flex; justify-content: space-between; }}
-  .checkleft {{ width: 60%; }}
-  .checkrow {{ display:flex; align-items:center; gap:10px; border-bottom: 1px solid #ddd; padding: 4px 0; }}
-  .cb {{ width: 12px; height: 12px; border: 1px solid #000; display:inline-block; }}
-  .checklabel {{ width: 70px; font-weight:700; text-transform: uppercase; }}
-  .checkright {{ width: 35%; text-align:right; font-weight:700; }}
-  .sectiontitle {{ margin: 12px 0 6px; font-size: 14px; font-weight: 800; text-align:center; }}
-  table {{ width: 100%; border-collapse: collapse; }}
-  td {{ border-bottom: 1px dotted #999; padding: 6px 6px; vertical-align: top; }}
-  .col-desc {{ width: 70%; }}
-  .col-mat {{ width: 30%; }}
-  .filled {{ font-weight: 600; }}
-  .matbox {{ border:1px solid #000; height: 110px; padding: 8px; }}
-  .footer {{ margin-top: 16px; font-size: 11px; }}
-</style>
-</head>
-<body>
-  <div class="top">
-    <div class="title">R. BAUMGARTNER AG</div>
-    <div class="righttop">
-      <div class="orderline">Auftragsnr.&nbsp;&nbsp;<span style="font-weight:800">{auftragsnr_h}</span>&nbsp;&nbsp;&nbsp;&nbsp;RBAG</div>
-      <div class="hoursbox">
-        <div class="lbl">STUNDEN</div>
-        <div class="val">{h_str}</div>
-      </div>
-    </div>
-  </div>
-
-  <div class="infogrid">
-    <div class="lines">
-      <div class="line"><div class="lab">OBJEKT</div><div class="val">{objekt_h}</div></div>
-      <div class="line"><div class="lab">KUNDE</div><div class="val">{kunde_h}</div></div>
-      <div class="line"><div class="lab">TELEFON</div><div class="val">{tel_h}</div></div>
-      <div class="line"><div class="lab">KONTAKTPER.</div><div class="val">{kontakt_h}</div></div>
-      <div class="line"><div class="lab">TELEFON</div><div class="val">{kontakt_tel_h}</div></div>
-      <div class="line"><div class="lab">NAME</div><div class="val">{emp_h}</div></div>
-      <div class="line"><div class="lab">DATUM</div><div class="val">{date_h}</div></div>
-    </div>
-    <div class="qrbox">{qr_img}</div>
-  </div>
-
-  <div class="checks">
-    <div class="checkleft">
-      <div class="checkrow"><div class="checklabel">CODE</div><span class="cb"></span></div>
-      <div class="checkrow"><div class="checklabel">MATERIAL</div><span class="cb"></span></div>
-      <div class="checkrow"><div class="checklabel">ASBEST</div><span class="cb"></span></div>
-    </div>
-    <div class="checkright">FUGENFARBEN<br/><span style="color:#777">ZEM. / SIL.</span></div>
-  </div>
-
-  <div class="sectiontitle">ARBEITSBESCHRIEB &amp; NOTIZEN</div>
-
-  <div style="display:grid; grid-template-columns: 1fr 260px; gap: 12px;">
-    <div>
-      <table>
-        {rows}
-      </table>
-    </div>
-    <div>
-      <div style="font-weight:700; text-align:center; margin-bottom:6px;">Material</div>
-      <div class="matbox">{mat_h}</div>
-      <div style="height:10px;"></div>
-      <div style="font-weight:700; text-align:center; border-top:1px solid #000; padding-top:6px;">MATERIAL REGIE</div>
-    </div>
-  </div>
-
-  <div class="footer">{today_footer}</div>
-</body>
-</html>"""
-    return html_doc
-
-
-# =========================
-# WEEKLY RAPPORT (PRINT / SCAN_20260110 STYLE)
-# =========================
-def _fmt_time(val: str) -> str:
-    s = str(val or "").strip()
-    if s in ["", "nan", "NaT"]:
-        return ""
-    return s
-
-def _fmt_date(d) -> str:
-    try:
-        if hasattr(d, "strftime"):
-            return d.strftime("%d.%m.%Y")
-    except Exception:
-        pass
-    return str(d)
-
-def _hours_to_hhmm(hours: float) -> str:
-    try:
-        m = int(round(float(hours) * 60))
-        hh = m // 60
-        mm = m % 60
-        return f"{hh:02d}:{mm:02d}"
-    except Exception:
-        return ""
-
-def get_weekly_rapport_html(company_name: str, employee_name: str, week_label: str, project_meta: dict, day_rows: list[dict]) -> str:
-    """Druckbarer Wochenrapport (Zeit + Reisezeit) ähnlich Scan_20260110 – aber mit
-    **Platz für bis zu 6 Baustellen pro Tag**.
-
-    day_rows: Liste mit dicts je Tag:
-      {
-        date,
-        ank, abd,
-        total_work_h, total_travel_h, pause_h,
-        lines: [ {baustelle, work_h, travel_h}, ... ]  # max 6
-      }
-    """
-    def day_block(r: dict) -> str:
-        d = _fmt_date(r.get("date",""))
-        ank = _fmt_time(r.get("ank",""))
-        abd = _fmt_time(r.get("abd",""))
-        travel = str(r.get("travel_min","") or "")
-        total_work = _hours_to_hhmm(r.get("total_work_h", 0.0))
-        total_travel = _hours_to_hhmm(r.get("total_travel_h", 0.0))
-        pause = _hours_to_hhmm(r.get("pause_h", 0.0))
-
-        lines = r.get("lines", []) or []
-        # 6 Zeilen fix (leere Zeilen auffüllen)
-        padded = list(lines)[:6]
-        while len(padded) < 6:
-            padded.append({"baustelle": "", "work_h": "", "travel_h": ""})
-
-        rows_html = "".join(
-            [
-                f"<tr><td class='c-site'>{html.escape(str(x.get('baustelle','') or ''))}</td>"
-                f"<td class='c-work'>{html.escape(str(x.get('work_h','') or ''))}</td>"
-                f"<td class='c-travel'>{html.escape(str(x.get('travel_h','') or ''))}</td></tr>"
-                for x in padded
-            ]
-        )
-
-        return f"""
-        <div class="day">
-          <div class="row top">
-            <div class="field w-date"><div class="lbl">Datum</div><div class="val">{d}</div></div>
-            <div class="field w-small"><div class="lbl">Ankunft Magazin (Uhrzeit)</div><div class="val">{ank}</div></div>
-            <div class="field w-small"><div class="lbl">Reisezeit direkt (Dauer)</div><div class="val">{travel}</div></div>
-          </div>
-
-          <div class="row mid">
-            <div class="lines">
-              <div class="lbl" style="margin-bottom:6px; font-weight:700;">Baustellen / Zeiten (max. 6)</div>
-              <table class="tlines">
-                <thead>
-                  <tr><th>Baustelle</th><th>Arbeitszeit</th><th>Reisezeit</th></tr>
-                </thead>
-                <tbody>
-                  {rows_html}
-                </tbody>
-              </table>
-            </div>
-
-            <div class="totals">
-              <div class="tfield"><div class="lbl">Total Arbeitszeit</div><div class="val">{total_work}</div></div>
-              <div class="tfield"><div class="lbl">Total Reisezeit</div><div class="val">{total_travel}</div></div>
-              <div class="tfield"><div class="lbl">Pause</div><div class="val">{pause}</div></div>
-            </div>
-          </div>
-
-          <div class="row bottom">
-            <div class="field w-small"><div class="lbl">Abfahrt Magazin (Uhrzeit)</div><div class="val">{abd}</div></div>
-            <div class="field w-small"><div class="lbl">Reisezeit direkt (Dauer)</div><div class="val">{travel}</div></div>
-          </div>
-        </div>
-        """
-
-    
-    blocks = "\n".join([day_block(r) for r in day_rows])
-
-    # Projektkopf (wie Papier-Rapport) – Stammdaten aus Projects.csv
-    pm = project_meta or {}
-    project_name_disp = html.escape(str(pm.get('Projekt','') or pm.get('Baustelle','') or '').strip())
-    def _v(key: str) -> str:
-        return html.escape(str(pm.get(key, "") or "").strip())
-
-    project_header_html = ""
-
-    css = """
-    <style>
-      body { font-family: Arial, Helvetica, sans-serif; color:#000; }
-      .page { width: 100%; }
-      .header { display:flex; justify-content:space-between; align-items:flex-end; margin: 6px 0 8px; }
-      .projectbox { border: 1px solid #000; padding: 8px; margin: 0 0 12px; }
-      .pline { display:flex; gap:10px; margin: 3px 0; }
-      .plbl { width: 120px; font-size: 10px; font-weight: 700; letter-spacing: .2px; }
-      .pval { flex: 1; font-size: 12px; border-bottom: 1px solid #000; min-height: 16px; padding-bottom: 2px; }
-      .title { font-weight:700; font-size: 18px; }
-      .name { font-size: 12px; }
-      .day { border: 1px solid #000; padding: 8px; margin: 10px 0; }
-      .row { display:flex; gap: 8px; align-items:stretch; }
-      .row.top { margin-bottom: 8px; }
-      .row.bottom { margin-top: 8px; justify-content:flex-end; }
-      .field { border:1px solid #000; padding:6px; }
-      .lbl { font-size: 10px; color:#333; margin-bottom: 4px; }
-      .val { font-size: 12px; min-height: 16px; }
-      .w-date { flex: 1.1; }
-      .w-small { flex: 1.2; }
-      .mid { align-items:stretch; }
-      .lines { flex: 1; border: 1px solid #000; padding: 6px; }
-      .tlines { width:100%; border-collapse:collapse; font-size: 11px; }
-      .tlines th, .tlines td { border:1px solid #000; padding:4px 6px; vertical-align:top; }
-      .tlines th { font-weight:700; background:#fff; }
-      .c-site { width: 60%; }
-      .c-work, .c-travel { width: 20%; text-align:center; }
-      .totals { width: 180px; display:flex; flex-direction:column; gap: 8px; }
-      .tfield { border:1px solid #000; padding:6px; }
-      @media print { .noprint { display:none; } }
-    </style>
-    """
-
-    return f"""<!doctype html>
-    <html><head><meta charset='utf-8'>{css}</head>
-    <body>
-      <div class="page">
-        <div class="header">
-          <div class="title">{html.escape(company_name)}</div>
-          <div class="name"><b>NAME</b> {html.escape(employee_name)} &nbsp;&nbsp; <b>WOCHE</b> {html.escape(week_label)} &nbsp;&nbsp; <b>PROJEKT</b> {project_name_disp}</div>
-        </div>
-        {blocks}
-      </div>
-    </body></html>"""
-
-
-# =========================
-# PROJECTS + REPORTS
-# =========================
-PROJECTS_CSV_NAME = "Projects.csv"
-PROJECTS_COLS = ["ProjektID", "Projekt", "Status", "Auftragsnr", "Objekt", "Kunde", "Telefon", "Kontaktperson", "Kontakttelefon"]
-RAPPORT_COLS = [
-    "Datum",
-    "Projekt",
-    "ProjektID",
-    "Auftragsnr",
-    "Objekt",
-    "Kunde",
-    "Telefon",
-    "Kontaktperson",
-    "Kontakttelefon",
-    "EmployeeID",
-    "Mitarbeiter",
-    "AnkunftMagazin",
-    "AbfahrtMagazin",
-    "ReiseHomeToSiteMin",
-    "ReiseSiteToHomeMin",
-    "ReiseDirektMin",
-    "ReiseBezahltMin",
-    "ReiseRegel",
-    "Reisezeit_h",
-    "Start",
-    "Ende",
-    "Pause_h",
-    "Stunden",
-    "Material",
-    "Bemerkung",
-]
-
-# =========================
-# EMPLOYEES + CLOSURES
-# =========================
-EMPLOYEES_CSV_NAME = "Employees.csv"
-EMPLOYEES_COLS = ["EmployeeID", "Name", "Rolle", "Stundenlohn", "PIN", "Status"]
-
-CLOSURES_CSV_NAME = "Closures.csv"
-CLOSURES_COLS = [
-    "Projekt",
-    "ProjektID",
-    "EmployeeID",
-    "Mitarbeiter",
-    "Jahr",
-    "KW",
-    "Von",
-    "Bis",
-    "TotalStunden",
-    "TotalReisezeit_h",
-    "Timestamp",
-    "Signed",
-]
-
-
-def get_projects_df():
-    files = list_files(REPORTS_FOLDER_ID)
-    csv_file = next((f for f in files if f["name"] == PROJECTS_CSV_NAME), None)
-    if csv_file:
-        data = download_bytes(csv_file["id"])
-        if data:
-            df = pd.read_csv(io.BytesIO(data))
-            # Backward-compatible: ensure expected columns exist
-            for c in PROJECTS_COLS:
-                if c not in df.columns:
-                    df[c] = ""
-            df = df[PROJECTS_COLS]
-            # Default status if missing/empty
-            if "Status" in df.columns:
-                df["Status"] = df["Status"].fillna("aktiv").replace("", "aktiv")
-            return df, csv_file["id"]
-    return pd.DataFrame(columns=PROJECTS_COLS), None
-
-
-def ensure_project_ids(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure each project has a stable ProjektID."""
-    df = df.copy()
-    if "ProjektID" not in df.columns:
-        df["ProjektID"] = ""
-    for idx, row in df.iterrows():
-        name = str(row.get("Projekt", "")).strip()
-        pid = str(row.get("ProjektID", "")).strip()
-        if name and not pid:
-            df.at[idx, "ProjektID"] = str(uuid4())[:8]
-    return df
-
-
-def save_projects_df(df, file_id=None):
-    df = ensure_project_ids(df)
-    csv_data = df.to_csv(index=False).encode("utf-8")
-    if file_id:
-        return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
-    return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, PROJECTS_CSV_NAME, "text/csv")
-
-
-def get_active_projects():
-    df, _ = get_projects_df()
-    if df.empty:
-        return []
-    if "Status" in df.columns:
-        return df[df["Status"] == "aktiv"]["Projekt"].tolist()
-    return df["Projekt"].tolist()
-
-
-def get_all_projects():
-    df, _ = get_projects_df()
-    if df.empty:
-        return []
-    return df["Projekt"].tolist()
-
-
-def get_project_record(project_name: str, projects_df: pd.DataFrame | None = None) -> dict:
-    """Return project master-data record from Projects.csv as a dict.
-
-    Accepts an optional preloaded projects_df for speed.
-    Always returns a dict with empty strings instead of None/NaN.
-    """
-    try:
-        df = projects_df
-        if df is None:
-            df, _ = get_projects_df()
-        if df is None or df.empty:
-            return {}
-
-        if "Projekt" not in df.columns:
-            return {}
-
-        hit = df[df["Projekt"].astype(str) == str(project_name)]
-        if hit.empty:
-            return {}
-
-        rec = hit.iloc[0].to_dict()
-
-        # Normalize missing values
-        for k in list(rec.keys()):
-            v = rec.get(k)
-            if v is None:
-                rec[k] = ""
-            else:
-                sv = str(v)
-                if sv.lower() == "nan":
-                    rec[k] = ""
-        return rec
-    except Exception:
-        return {}
-
-
-def get_reports_df(project_name: str):
-    filename = f"{project_name}_Reports.csv"
-    files = list_files(REPORTS_FOLDER_ID)
-    csv_file = next((f for f in files if f["name"] == filename), None)
-    if csv_file:
-        data = download_bytes(csv_file["id"])
-        if data:
-            df = pd.read_csv(io.BytesIO(data))
-            # Backward-compatible: ensure expected columns exist
-            for c in RAPPORT_COLS:
-                if c not in df.columns:
-                    df[c] = "" if c not in ["Pause_h", "Stunden", "Reisezeit_h"] else 0.0
-            df = df[RAPPORT_COLS]
-            return df, csv_file["id"]
-    return pd.DataFrame(columns=RAPPORT_COLS), None
-
-
-def save_reports_df(project_name: str, df: 'pd.DataFrame', file_id: str | None) -> bool:
-    """Save full reports dataframe back to Drive (Admin editing)."""
-    df2 = df.copy()
-    for c in RAPPORT_COLS:
-        if c not in df2.columns:
-            df2[c] = '' if c not in ['Pause_h','Stunden','Reisezeit_h'] else 0.0
-    df2 = df2[RAPPORT_COLS]
-    csv_data = df2.to_csv(index=False).encode('utf-8')
-    if file_id:
-        return update_file_in_drive(file_id, csv_data, mimetype='text/csv')
-    return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, f"{project_name}_Reports.csv", 'text/csv')
-
-
-def save_report(project_name: str, row_dict: dict) -> bool:
-    df, file_id = get_reports_df(project_name)
-    df = pd.concat([df, pd.DataFrame([row_dict])], ignore_index=True)
-    csv_data = df.to_csv(index=False).encode("utf-8")
-    if file_id:
-        return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
-    return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, f"{project_name}_Reports.csv", "text/csv")
-
-
-
-
-def get_employees_df():
-    files = list_files(REPORTS_FOLDER_ID)
-    csv_file = next((f for f in files if f["name"] == EMPLOYEES_CSV_NAME), None)
-    if csv_file:
-        data = download_bytes(csv_file["id"])
-        if data:
-            df = pd.read_csv(io.BytesIO(data))
-            for c in EMPLOYEES_COLS:
-                if c not in df.columns:
-                    df[c] = ""
-            df = df[EMPLOYEES_COLS]
-            if "Status" in df.columns:
-                df["Status"] = df["Status"].fillna("aktiv").replace("", "aktiv")
-            return df, csv_file["id"]
-    return pd.DataFrame(columns=EMPLOYEES_COLS), None
-
-
-def save_employees_df(df: pd.DataFrame, file_id: str | None = None) -> bool:
-    df2 = df.copy()
-    for c in EMPLOYEES_COLS:
-        if c not in df2.columns:
-            df2[c] = ""
-    df2 = df2[EMPLOYEES_COLS]
-    csv_data = df2.to_csv(index=False).encode("utf-8")
-    if file_id:
-        return update_file_in_drive(file_id, csv_data, mimetype="text/csv")
-    return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, EMPLOYEES_CSV_NAME, "text/csv")
-
-
-def get_closures_df():
-    files = list_files(REPORTS_FOLDER_ID)
-    csv_file = next((f for f in files if f["name"] == CLOSURES_CSV_NAME), None)
-    if csv_file:
-        data = download_bytes(csv_file["id"])
-        if data:
-            df = pd.read_csv(io.BytesIO(data))
-            for c in CLOSURES_COLS:
-                if c not in df.columns:
-                    df[c] = ""
-            df = df[CLOSURES_COLS]
-            return df, csv_file["id"]
-    return pd.DataFrame(columns=CLOSURES_COLS), None
-
-
-def append_closure(row: dict) -> bool:
-    df, fid = get_closures_df()
-    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    csv_data = df.to_csv(index=False).encode("utf-8")
-    if fid:
-        return update_file_in_drive(fid, csv_data, mimetype="text/csv")
-    return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, CLOSURES_CSV_NAME, "text/csv")
-
-AZK_CSV_NAME = "AZK.csv"
-AZK_COLS = ["Jahr", "KW", "EmployeeID", "Mitarbeiter", "ProjektID", "Projekt", "TotalStunden", "TotalReisezeit_h", "Timestamp"]
-
-def get_azk_df():
-    files = list_files(REPORTS_FOLDER_ID)
-    csv_file = next((f for f in files if f["name"] == AZK_CSV_NAME), None)
-    if csv_file:
-        data = download_bytes(csv_file["id"])
-        if data:
-            df = pd.read_csv(io.BytesIO(data))
-            for c in AZK_COLS:
-                if c not in df.columns:
-                    df[c] = ""
-            df = df[AZK_COLS]
-            return df, csv_file["id"]
-    return pd.DataFrame(columns=AZK_COLS), None
-
-
-def upsert_azk_row(row: dict) -> bool:
-    """Upsert by (Jahr, KW, EmployeeID, ProjektID)."""
-    df, fid = get_azk_df()
-    df2 = pd.DataFrame([row])
-    for c in AZK_COLS:
-        if c not in df2.columns:
-            df2[c] = ""
-    df2 = df2[AZK_COLS]
-
-    if df.empty:
-        out = df2
-    else:
-        key_cols = ["Jahr", "KW", "EmployeeID", "ProjektID"]
-        # ensure types
-        for k in key_cols:
-            df[k] = df[k].astype(str)
-            df2[k] = df2[k].astype(str)
-        mask = (df["Jahr"] == str(row.get("Jahr"))) & (df["KW"] == str(row.get("KW"))) & (df["EmployeeID"] == str(row.get("EmployeeID"))) & (df["ProjektID"] == str(row.get("ProjektID")))
-        if mask.any():
-            # replace first match
-            idx = df[mask].index[0]
-            for c in AZK_COLS:
-                df.at[idx, c] = df2.iloc[0][c]
-            out = df
-        else:
-            out = pd.concat([df, df2], ignore_index=True)
-
-    csv_data = out.to_csv(index=False).encode("utf-8")
-    if fid:
-        return update_file_in_drive(fid, csv_data, mimetype="text/csv")
-    return upload_bytes_to_drive(csv_data, REPORTS_FOLDER_ID, AZK_CSV_NAME, "text/csv")
-
-
-def iso_year_week(d: datetime.date) -> tuple[int, int]:
-    iso = d.isocalendar()
-    return int(iso[0]), int(iso[1])
-
-
-def week_date_range(year: int, week: int) -> tuple[datetime, datetime]:
-    start = datetime.fromisocalendar(year, week, 1)
-    end = datetime.fromisocalendar(year, week, 7)
-    return start, end
-# =========================
-# CLOUD RUN UPLOAD WIDGET (MOBILE STABLE)
-# =========================
+# =========================================================
+# CLOUD RUN UPLOAD WIDGET (mobil stabil)
+# =========================================================
 def cloudrun_upload_widget(
     *,
     project: str,
-    bucket: str,
+    upload_type: str,  # "photo" | "plan"
     title: str,
     help_text: str,
     accept: str,
     multiple: bool = True,
     height: int = 230,
 ):
-    """
-    bucket: "photos" oder "uploads" (uploads wird aktuell nur als Typ-Unterscheidung verwendet)
-    accept: "image/*" für Fotos
-    """
     uid = str(uuid4()).replace("-", "")
 
     html = r"""
@@ -999,8 +231,8 @@ def cloudrun_upload_widget(
     (function() {
       const url = "__URL__";
       const token = "__TOKEN__";
-      const bucket = "__BUCKET__";
       const project = "__PROJECT__";
+      const uploadType = "__UPLOAD_TYPE__";
 
       const btn = document.getElementById("uploadBtn___UID__");
       const input = document.getElementById("fileInput___UID__");
@@ -1027,9 +259,6 @@ def cloudrun_upload_widget(
           const fd = new FormData();
           fd.append("file", file);
           fd.append("project", project);
-
-          // Backend erwartet "plan" oder "photo"
-          const uploadType = (bucket === "uploads") ? "plan" : "photo";
           fd.append("upload_type", uploadType);
 
           try {
@@ -1072,8 +301,8 @@ def cloudrun_upload_widget(
         .replace("__HELP__", help_text)
         .replace("__URL__", UPLOAD_SERVICE_URL)
         .replace("__TOKEN__", UPLOAD_SERVICE_TOKEN)
-        .replace("__BUCKET__", bucket)
         .replace("__PROJECT__", project)
+        .replace("__UPLOAD_TYPE__", upload_type)
         .replace("__ACCEPT__", accept)
         .replace("__UID__", uid)
         .replace("__MULT__", "multiple" if multiple else "")
@@ -1082,11 +311,302 @@ def cloudrun_upload_widget(
     components.html(html, height=height)
 
 
-# =========================
-# SAFE IMAGE PREVIEW
-# =========================
-def image_preview_from_drive(file_id: str):
-    data = download_bytes(file_id)
+# =========================================================
+# DATA MODEL (CSV in Drive)
+# =========================================================
+PROJECTS_CSV = "Projects.csv"
+EMPLOYEES_CSV = "Employees.csv"
+
+CLOSURES_CSV = "Closures.csv"   # Wochenabschlüsse/Signaturen
+AZK_CSV = "AZK.csv"             # Auswertung (MA/Woche/Projekt Summen)
+
+PROJECTS_COLS = [
+    "ProjektID", "Projekt", "Status",
+    "Auftragsnr", "Objekt", "Kunde", "Telefon",
+    "Kontaktperson", "Kontakttelefon",
+]
+EMPLOYEES_COLS = ["EmployeeID", "Name", "Rolle", "Stundenlohn", "PIN", "Status"]
+
+# Baustellenrapport pro Projekt -> Datei: {Projekt}_Reports.csv in PROJECT_REPORTS_FOLDER_ID
+RAPPORT_COLS = [
+    "Datum",
+    "Projekt",
+    "ProjektID",
+    "Auftragsnr",
+    "Objekt",
+    "Kunde",
+    "Telefon",
+    "Kontaktperson",
+    "Kontakttelefon",
+    "EmployeeID",
+    "Mitarbeiter",
+    "AnkunftMagazin",
+    "AbfahrtMagazin",
+    "ReiseHomeToSiteMin",
+    "ReiseSiteToHomeMin",
+    "ReiseDirektMin",
+    "ReiseBezahltMin",
+    "ReiseRegel",
+    "Reisezeit_h",
+    "Start",
+    "Ende",
+    "Pause_h",
+    "Stunden",
+    "Material",
+    "Bemerkung",
+]
+
+CLOSURES_COLS = [
+    "Projekt",
+    "ProjektID",
+    "EmployeeID",
+    "Mitarbeiter",
+    "Jahr",
+    "KW",
+    "Von",
+    "Bis",
+    "TotalStunden",
+    "TotalReisezeit_h",
+    "Timestamp",
+    "Signed",
+]
+
+AZK_COLS = ["Jahr", "KW", "EmployeeID", "Mitarbeiter", "ProjektID", "Projekt", "TotalStunden", "TotalReisezeit_h", "Timestamp"]
+
+
+def _csv_find(folder_id: str, filename: str) -> tuple[pd.DataFrame, str | None]:
+    files = drive_list_files(folder_id, limit=800)
+    hit = next((f for f in files if f["name"] == filename), None)
+    if not hit:
+        return pd.DataFrame(), None
+    data = drive_download_bytes(hit["id"])
+    if not data:
+        return pd.DataFrame(), hit["id"]
+    return pd.read_csv(io.BytesIO(data)), hit["id"]
+
+
+def _csv_save(folder_id: str, filename: str, df: pd.DataFrame, file_id: str | None) -> bool:
+    raw = df.to_csv(index=False).encode("utf-8")
+    if file_id:
+        return drive_update_file(file_id, raw, mimetype="text/csv")
+    return drive_upload_bytes(raw, folder_id, filename, "text/csv") is not None
+
+
+def get_projects() -> tuple[pd.DataFrame, str | None]:
+    df, fid = _csv_find(PROJECT_REPORTS_FOLDER_ID, PROJECTS_CSV)
+    if df.empty:
+        df = pd.DataFrame(columns=PROJECTS_COLS)
+    for c in PROJECTS_COLS:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[PROJECTS_COLS]
+    df["Status"] = df["Status"].fillna("aktiv").replace("", "aktiv")
+    return df, fid
+
+
+def save_projects(df: pd.DataFrame, fid: str | None) -> bool:
+    df2 = df.copy()
+    for c in PROJECTS_COLS:
+        if c not in df2.columns:
+            df2[c] = ""
+    # ProjektID stabil erzeugen
+    for idx, r in df2.iterrows():
+        name = str(r.get("Projekt", "")).strip()
+        pid = str(r.get("ProjektID", "")).strip()
+        if name and not pid:
+            df2.at[idx, "ProjektID"] = str(uuid4())[:8]
+    df2["Status"] = df2["Status"].fillna("aktiv").replace("", "aktiv")
+    df2 = df2[PROJECTS_COLS]
+    return _csv_save(PROJECT_REPORTS_FOLDER_ID, PROJECTS_CSV, df2, fid)
+
+
+def get_employees() -> tuple[pd.DataFrame, str | None]:
+    df, fid = _csv_find(PROJECT_REPORTS_FOLDER_ID, EMPLOYEES_CSV)
+    if df.empty:
+        df = pd.DataFrame(columns=EMPLOYEES_COLS)
+    for c in EMPLOYEES_COLS:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[EMPLOYEES_COLS]
+    df["Status"] = df["Status"].fillna("aktiv").replace("", "aktiv")
+    return df, fid
+
+
+def save_employees(df: pd.DataFrame, fid: str | None) -> bool:
+    df2 = df.copy()
+    for c in EMPLOYEES_COLS:
+        if c not in df2.columns:
+            df2[c] = ""
+    df2 = df2[EMPLOYEES_COLS]
+    df2["Status"] = df2["Status"].fillna("aktiv").replace("", "aktiv")
+
+    # EmployeeID generieren wenn fehlt
+    for idx, r in df2.iterrows():
+        name = str(r.get("Name", "")).strip()
+        eid = str(r.get("EmployeeID", "")).strip()
+        if name and not eid:
+            base = re.sub(r"[^A-Za-z0-9]+", "", name.upper())[:6]
+            df2.at[idx, "EmployeeID"] = (base or str(uuid4())[:6]).upper()
+
+    return _csv_save(PROJECT_REPORTS_FOLDER_ID, EMPLOYEES_CSV, df2, fid)
+
+
+def get_project_record(project_name: str, projects_df: pd.DataFrame) -> dict:
+    if projects_df is None or projects_df.empty:
+        return {}
+    hit = projects_df[projects_df["Projekt"].astype(str) == str(project_name)]
+    if hit.empty:
+        return {}
+    rec = hit.iloc[0].to_dict()
+    # normalize NaN
+    for k, v in list(rec.items()):
+        if v is None:
+            rec[k] = ""
+        else:
+            sv = str(v)
+            rec[k] = "" if sv.lower() == "nan" else sv
+    return rec
+
+
+def report_filename(project_name: str) -> str:
+    return f"{project_name}_Reports.csv"
+
+
+def get_reports(project_name: str) -> tuple[pd.DataFrame, str | None]:
+    df, fid = _csv_find(PROJECT_REPORTS_FOLDER_ID, report_filename(project_name))
+    if df.empty:
+        df = pd.DataFrame(columns=RAPPORT_COLS)
+    for c in RAPPORT_COLS:
+        if c not in df.columns:
+            df[c] = "" if c not in ["Pause_h", "Stunden", "Reisezeit_h"] else 0.0
+    df = df[RAPPORT_COLS]
+    return df, fid
+
+
+def append_report(project_name: str, row: dict) -> bool:
+    df, fid = get_reports(project_name)
+    df2 = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    return _csv_save(PROJECT_REPORTS_FOLDER_ID, report_filename(project_name), df2, fid)
+
+
+def save_reports(project_name: str, df: pd.DataFrame, fid: str | None) -> bool:
+    df2 = df.copy()
+    for c in RAPPORT_COLS:
+        if c not in df2.columns:
+            df2[c] = "" if c not in ["Pause_h", "Stunden", "Reisezeit_h"] else 0.0
+    df2 = df2[RAPPORT_COLS]
+    return _csv_save(PROJECT_REPORTS_FOLDER_ID, report_filename(project_name), df2, fid)
+
+
+def get_closures() -> tuple[pd.DataFrame, str | None]:
+    df, fid = _csv_find(TIME_REPORTS_FOLDER_ID, CLOSURES_CSV)
+    if df.empty:
+        df = pd.DataFrame(columns=CLOSURES_COLS)
+    for c in CLOSURES_COLS:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[CLOSURES_COLS]
+    return df, fid
+
+
+def append_closure(row: dict) -> bool:
+    df, fid = get_closures()
+    df2 = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    return _csv_save(TIME_REPORTS_FOLDER_ID, CLOSURES_CSV, df2, fid)
+
+
+def get_azk() -> tuple[pd.DataFrame, str | None]:
+    df, fid = _csv_find(TIME_REPORTS_FOLDER_ID, AZK_CSV)
+    if df.empty:
+        df = pd.DataFrame(columns=AZK_COLS)
+    for c in AZK_COLS:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[AZK_COLS]
+    return df, fid
+
+
+def upsert_azk(row: dict) -> bool:
+    df, fid = get_azk()
+    df2 = pd.DataFrame([row])
+    for c in AZK_COLS:
+        if c not in df2.columns:
+            df2[c] = ""
+    df2 = df2[AZK_COLS]
+
+    if df.empty:
+        out = df2
+    else:
+        key_cols = ["Jahr", "KW", "EmployeeID", "ProjektID"]
+        for k in key_cols:
+            df[k] = df[k].astype(str)
+            df2[k] = df2[k].astype(str)
+
+        mask = (
+            (df["Jahr"] == str(row.get("Jahr"))) &
+            (df["KW"] == str(row.get("KW"))) &
+            (df["EmployeeID"] == str(row.get("EmployeeID"))) &
+            (df["ProjektID"] == str(row.get("ProjektID")))
+        )
+        if mask.any():
+            idx = df[mask].index[0]
+            for c in AZK_COLS:
+                df.at[idx, c] = df2.iloc[0][c]
+            out = df
+        else:
+            out = pd.concat([df, df2], ignore_index=True)
+
+    return _csv_save(TIME_REPORTS_FOLDER_ID, AZK_CSV, out, fid)
+
+
+# =========================================================
+# TIME HELPERS
+# =========================================================
+def iso_year_week(d: date) -> tuple[int, int]:
+    y, w, _ = d.isocalendar()
+    return int(y), int(w)
+
+
+def week_range(year: int, week: int) -> tuple[date, date]:
+    start = datetime.fromisocalendar(year, week, 1).date()
+    end = datetime.fromisocalendar(year, week, 7).date()
+    return start, end
+
+
+def hours_to_hhmm(h: float) -> str:
+    try:
+        m = int(round(float(h) * 60))
+        return f"{m//60:02d}:{m%60:02d}"
+    except Exception:
+        return ""
+
+
+# =========================================================
+# QR CODE
+# =========================================================
+def generate_project_qr(project_name: str) -> bytes:
+    safe_project = quote(project_name)
+    link = f"{BASE_APP_URL}?embed=true&project={safe_project}"
+
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(link)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+# =========================================================
+# PREVIEW HELPERS
+# =========================================================
+def safe_image_preview(file_id: str):
+    data = drive_download_bytes(file_id)
     if not data:
         st.warning("Konnte Bild nicht laden.")
         return
@@ -1096,291 +616,264 @@ def image_preview_from_drive(file_id: str):
         st.warning("Bild konnte nicht angezeigt werden (Format/Upload defekt).")
 
 
-# =========================
-# UI & DEEP LINKING LOGIC
-# =========================
+# =========================================================
+# NAV / DEEP LINK
+# =========================================================
 st.sidebar.title("Menü")
-default_mode = 0  # 👷 Mitarbeiter
+
+default_mode = 0
 if st.query_params.get("mode") == "admin":
-    default_mode = 1  # 🛠️ Admin
+    default_mode = 1
 
-mode = st.sidebar.radio(
-    "Bereich",
-    ["👷 Mitarbeiter", "🛠️ Admin"],
-    index=default_mode
-)
+mode = st.sidebar.radio("Bereich", ["👷 Mitarbeiter", "🛠️ Admin"], index=default_mode)
+
+target_project = st.query_params.get("project", None)
 
 
-# Deep Linking (QR)
-target_project_from_qr = None
-if "project" in st.query_params:
-    target_project_from_qr = st.query_params["project"]
+# =========================================================
+# COMMON: Load projects once
+# =========================================================
+projects_df, projects_fid = get_projects()
+
+active_projects = projects_df[projects_df["Status"] == "aktiv"]["Projekt"].tolist() if not projects_df.empty else []
+all_projects = projects_df["Projekt"].tolist() if not projects_df.empty else []
 
 
-# -------------------------
+# =========================================================
 # 👷 MITARBEITER
-# -------------------------
+# =========================================================
 if mode == "👷 Mitarbeiter":
     st.title("👷 Mitarbeiterbereich")
 
-    # 📲 BauApp als Verknüpfung (Handy / Startbildschirm)
     emp_link = f"{BASE_APP_URL}?embed=true"
     st.info(
         "📲 **BauApp als Verknüpfung speichern**\n\n"
-        f"👉 Öffne diesen Link: {emp_link}\n\n"
-        "• **iPhone (Safari):** Teilen → *Zum Home-Bildschirm*\n"
-        "• **Android (Chrome):** ⋮ → *Zum Startbildschirm hinzufügen* / *App installieren*"
+        f"👉 {emp_link}\n\n"
+        "• iPhone (Safari): Teilen → Zum Home-Bildschirm\n"
+        "• Android (Chrome): ⋮ → Zum Startbildschirm hinzufügen / App installieren"
     )
     st.link_button("🔗 Mitarbeiter-Link öffnen", emp_link)
 
-    # 🛠️ Admin-Link (ohne embed) – damit der Admin-Bereich/Sidebar verfügbar ist
-    admin_link_public = f"{BASE_APP_URL}?mode=admin"
+    admin_link = f"{BASE_APP_URL}?mode=admin"
     with st.expander("🛠️ Admin öffnen"):
-        st.write("Dieser Link öffnet die App **ohne** Embed-Modus. Danach kann im Admin-Bereich der Admin-PIN eingegeben werden.")
-        st.code(admin_link_public)
-        st.link_button("🔐 Admin-Link öffnen", admin_link_public)
+        st.code(admin_link)
+        st.link_button("🔐 Admin-Link öffnen", admin_link)
 
-    active_projects = get_active_projects()
     if not active_projects:
-        st.warning("Keine aktiven Projekte.")
+        st.warning("Keine aktiven Projekte vorhanden (Admin: Projekte anlegen).")
         st.stop()
 
-    default_index = 0
-    if target_project_from_qr:
-        if target_project_from_qr in active_projects:
-            default_index = active_projects.index(target_project_from_qr)
-            st.success(f"📍 Direkteinstieg via QR-Code: {target_project_from_qr}")
-        else:
-            st.warning(
-                f"Das Projekt '{target_project_from_qr}' aus dem QR-Code ist nicht aktiv oder existiert nicht."
-            )
+    default_idx = 0
+    if target_project and target_project in active_projects:
+        default_idx = active_projects.index(target_project)
+        st.success(f"📍 Direkteinstieg via QR-Code: {target_project}")
 
-    project = st.selectbox("Projekt wählen", active_projects, index=default_index)
+    project = st.selectbox("Projekt wählen", active_projects, index=default_idx)
 
-    # 🔎 Projekt-Stammdaten (wie Papier-Rapport) anzeigen
-    proj_rec = get_project_record(project)
+    proj_rec = get_project_record(project, projects_df)
     if proj_rec:
-        lines = []
-        if str(proj_rec.get("Auftragsnr","")).strip():
-            lines.append(f"**Auftragsnr.:** {proj_rec.get('Auftragsnr')}")
-        if str(proj_rec.get("Objekt","")).strip():
-            lines.append(f"**Objekt:** {proj_rec.get('Objekt')}")
-        if str(proj_rec.get("Kunde","")).strip():
-            lines.append(f"**Kunde:** {proj_rec.get('Kunde')}")
-        if str(proj_rec.get("Telefon","")).strip():
-            lines.append(f"**Telefon:** {proj_rec.get('Telefon')}")
-        if str(proj_rec.get("Kontaktperson","")).strip():
-            lines.append(f"**Kontaktperson:** {proj_rec.get('Kontaktperson')}")
-        if str(proj_rec.get("Kontakttelefon","")).strip():
-            lines.append(f"**Kontakt-Tel.:** {proj_rec.get('Kontakttelefon')}")
-        if lines:
+        info = []
+        if proj_rec.get("Auftragsnr"): info.append(f"**Auftragsnr.:** {proj_rec.get('Auftragsnr')}")
+        if proj_rec.get("Objekt"): info.append(f"**Objekt:** {proj_rec.get('Objekt')}")
+        if proj_rec.get("Kunde"): info.append(f"**Kunde:** {proj_rec.get('Kunde')}")
+        if proj_rec.get("Telefon"): info.append(f"**Telefon:** {proj_rec.get('Telefon')}")
+        if proj_rec.get("Kontaktperson"): info.append(f"**Kontaktperson:** {proj_rec.get('Kontaktperson')}")
+        if proj_rec.get("Kontakttelefon"): info.append(f"**Kontakt-Tel.:** {proj_rec.get('Kontakttelefon')}")
+        if info:
             st.markdown("#### Projektdaten")
-            st.info(" · ".join(lines))
+            st.info(" · ".join(info))
 
     t1, t2, t3 = st.tabs(["📝 Rapport", "📷 Fotos", "📂 Pläne"])
 
-    # --- RAPPORT ---
+    # -------------------------
+    # Rapport erfassen
+    # -------------------------
     with t1:
         st.subheader("Rapport erfassen")
+
+        df_emp, emp_fid = get_employees()
+        df_emp = df_emp.copy()
+        df_emp["Status"] = df_emp["Status"].astype(str).str.lower().replace("nan", "").replace("", "aktiv")
+        df_emp_active = df_emp[df_emp["Status"] == "aktiv"]
+
         c1, c2, c3 = st.columns(3)
+        date_val = c1.date_input("Datum", datetime.now().date())
 
-        date_val = c1.date_input("Datum", datetime.now())
-        df_emp, _emp_fid = get_employees_df()
-        df_emp_active = df_emp[df_emp["Status"].astype(str).str.lower().fillna("aktiv") == "aktiv"] if not df_emp.empty else df_emp
+        ma_sel = None
         if df_emp_active.empty:
-            st.warning("Keine Mitarbeiter erfasst (Employees.csv fehlt/leer). Admin: Mitarbeiter anlegen.")
-            ma_sel = None
+            st.warning("Keine Mitarbeiter vorhanden (Admin: Mitarbeiter anlegen).")
         else:
-            # Display name list, store EmployeeID
-            emp_options = df_emp_active.apply(lambda r: f'{r["Name"]} ({r["EmployeeID"]})' if str(r["EmployeeID"]).strip() else str(r["Name"]), axis=1).tolist()
-            emp_map = {emp_options[i]: df_emp_active.iloc[i].to_dict() for i in range(len(emp_options))}
-            ma_key = c1.selectbox("Mitarbeiter", emp_options)
-            ma_sel = emp_map.get(ma_key)
-            # defaults (damit Variablen immer existieren)
-            ank_mag = None
-            abd_mag = None
-            reise_home_to_site_min = 0
-            reise_site_to_home_min = 0
-            reise_direkt_total_min = 0
-            reise_bezahlt_min = 0
-            reise_bezahlt_h = 0.0
-            reise_regel = "SPV: Bezahlt nur Direktfahrt Zuhause↔Baustelle; pro Richtung 30 Min Selbstbehalt. Magazinfahrten unbezahlt."
-
-            with st.expander("🚗 Fahrtzeiten (SPV-konform)", expanded=False):
-                st.caption(
-                    "Regel: Magazin↔Baustelle ist **nicht** bezahlte Fahrtzeit. "
-                    "Bezahlt wird nur Direktfahrt Zuhause↔Baustelle, **pro Richtung minus 30 Min Selbstbehalt**."
-                )
-
-                ec1, ec2, ec3 = st.columns(3)
-
-                # Magazinzeiten nur als Info (nicht bezahlt)
-                has_ank = ec1.checkbox("Ankunft Magazin erfassen", value=False, key="ank_mag_chk")
-                ank_mag = ec1.time_input("Ankunft Magazin (Uhrzeit)", time(0, 0), key="ank_mag_time") if has_ank else None
-
-                has_abd = ec2.checkbox("Abfahrt Magazin erfassen", value=False, key="abd_mag_chk")
-                abd_mag = ec2.time_input("Abfahrt Magazin (Uhrzeit)", time(0, 0), key="abd_mag_time") if has_abd else None
-
-                # Direktfahrten (nur diese zählen)
-                reise_home_to_site_min = int(ec3.number_input("Direkt: Zuhause → Baustelle (Min)", 0, 600, 0, 5, key="reise_h2s_min"))
-                reise_site_to_home_min = int(ec3.number_input("Direkt: Baustelle → Zuhause (Min)", 0, 600, 0, 5, key="reise_s2h_min"))
-
-                reise_direkt_total_min = reise_home_to_site_min + reise_site_to_home_min
-
-                # 30 Min Selbstbehalt PRO RICHTUNG (nur wenn diese Richtung erfasst ist)
-                bezahlt_h2s = max(0, reise_home_to_site_min - 30) if reise_home_to_site_min > 0 else 0
-                bezahlt_s2h = max(0, reise_site_to_home_min - 30) if reise_site_to_home_min > 0 else 0
-
-                reise_bezahlt_min = bezahlt_h2s + bezahlt_s2h
-                reise_bezahlt_h = round(reise_bezahlt_min / 60.0, 2)
-
-                # Anzeige zur Kontrolle
-                if reise_direkt_total_min > 0:
-                    st.info(
-                        f"Direkt: H→B {reise_home_to_site_min} Min (bezahlt {bezahlt_h2s}), "
-                        f"B→H {reise_site_to_home_min} Min (bezahlt {bezahlt_s2h}) → "
-                        f"Bezahlt gesamt: {reise_bezahlt_min} Min (= {reise_bezahlt_h} h)"
-                    )
-                else:
-                    st.info("Keine Direktfahrt erfasst → bezahlte Fahrtzeit = 0")
+            options = df_emp_active.apply(
+                lambda r: f'{r["Name"]} ({r["EmployeeID"]})',
+                axis=1
+            ).tolist()
+            sel_key = c1.selectbox("Mitarbeiter", options)
+            idx = options.index(sel_key)
+            ma_sel = df_emp_active.iloc[idx].to_dict()
 
         start_val = c2.time_input("Start", time(7, 0))
         end_val = c2.time_input("Ende", time(16, 0))
-        pause_val = c3.number_input("Pause (h)", 0.0, 5.0, 0.5, 0.25)
-        mat_val = c3.text_input("Material")
-        rem_val = st.text_area("Bemerkung")
+        pause_h = c3.number_input("Pause (h)", 0.0, 5.0, 0.5, 0.25)
+        material = c3.text_input("Material")
+        remark = st.text_area("Bemerkung")
 
+        # Fahrtzeiten (SPV-konform)
+        ank_mag = ""
+        abd_mag = ""
+        h2s = 0
+        s2h = 0
+        reise_direkt = 0
+        reise_bezahlt_min = 0
+        reise_bezahlt_h = 0.0
+        reise_regel = "SPV: Bezahlt nur Direktfahrt Zuhause↔Baustelle; pro Richtung 30 Min Selbstbehalt. Magazinfahrten unbezahlt."
+
+        with st.expander("🚗 Fahrtzeiten (SPV-konform)", expanded=False):
+            st.caption(
+                "Regel: Magazin↔Baustelle ist **nicht** bezahlte Fahrtzeit. "
+                "Bezahlt wird nur Direktfahrt Zuhause↔Baustelle, **pro Richtung minus 30 Min Selbstbehalt**."
+            )
+            ec1, ec2, ec3 = st.columns(3)
+            if ec1.checkbox("Ankunft Magazin erfassen", value=False):
+                ank_mag = str(ec1.time_input("Ankunft Magazin (Uhrzeit)", time(0, 0)))
+            if ec2.checkbox("Abfahrt Magazin erfassen", value=False):
+                abd_mag = str(ec2.time_input("Abfahrt Magazin (Uhrzeit)", time(0, 0)))
+
+            h2s = int(ec3.number_input("Direkt: Zuhause → Baustelle (Min)", 0, 600, 0, 5))
+            s2h = int(ec3.number_input("Direkt: Baustelle → Zuhause (Min)", 0, 600, 0, 5))
+            reise_direkt = h2s + s2h
+
+            bezahlt_h2s = max(0, h2s - 30) if h2s > 0 else 0
+            bezahlt_s2h = max(0, s2h - 30) if s2h > 0 else 0
+            reise_bezahlt_min = bezahlt_h2s + bezahlt_s2h
+            reise_bezahlt_h = round(reise_bezahlt_min / 60.0, 2)
+
+            st.info(
+                f"Direkt: H→B {h2s} Min (bezahlt {bezahlt_h2s}), "
+                f"B→H {s2h} Min (bezahlt {bezahlt_s2h}) → "
+                f"Bezahlt gesamt: {reise_bezahlt_min} Min (= {reise_bezahlt_h} h)"
+            )
+
+        # Stunden berechnen
         dt_start = datetime.combine(datetime.today(), start_val)
         dt_end = datetime.combine(datetime.today(), end_val)
         if dt_end < dt_start:
             dt_end += timedelta(days=1)
 
-        dur = round(max(0.0, (dt_end - dt_start).total_seconds() / 3600 - pause_val), 2)
-        st.info(f"Stunden: {dur}")
+        hours = round(max(0.0, (dt_end - dt_start).total_seconds() / 3600 - float(pause_h)), 2)
+        st.info(f"Stunden: {hours}")
 
         if st.button("✅ Speichern", type="primary"):
             if not ma_sel:
                 st.error("Mitarbeiter fehlt.")
             else:
-                ok = save_report(
-                    project,
-                    {
-                        "Datum": str(date_val),
-                        "Projekt": project,
-                        "ProjektID": str(proj_rec.get("ProjektID","")).strip(),
-                        "Auftragsnr": str(proj_rec.get("Auftragsnr","")).strip(),
-                        "Objekt": str(proj_rec.get("Objekt","")).strip(),
-                        "Kunde": str(proj_rec.get("Kunde","")).strip(),
-                        "Telefon": str(proj_rec.get("Telefon","")).strip(),
-                        "Kontaktperson": str(proj_rec.get("Kontaktperson","")).strip(),
-                        "Kontakttelefon": str(proj_rec.get("Kontakttelefon","")).strip(),
-                        "EmployeeID": str(ma_sel.get("EmployeeID","")).strip(),
-                        "Mitarbeiter": str(ma_sel.get("Name","")).strip(),
-                        "AnkunftMagazin": str(ank_mag) if ank_mag else "",
-                        "AbfahrtMagazin": str(abd_mag) if abd_mag else "",
-                        "ReiseHomeToSiteMin": int(reise_home_to_site_min),
-                        "ReiseSiteToHomeMin": int(reise_site_to_home_min),
-                        "ReiseDirektMin": int(reise_direkt_total_min),
-                        "ReiseBezahltMin": int(reise_bezahlt_min),
-                        "ReiseRegel": str(reise_regel),
-                        "Reisezeit_h": float(reise_bezahlt_h),
-
-"Start": str(start_val),
-                        "Ende": str(end_val),
-                        "Pause_h": pause_val,
-                        "Stunden": dur,
-                        "Material": mat_val,
-                        "Bemerkung": rem_val,
-                    },
-                )
+                row = {
+                    "Datum": str(date_val),
+                    "Projekt": project,
+                    "ProjektID": str(proj_rec.get("ProjektID", "")).strip(),
+                    "Auftragsnr": str(proj_rec.get("Auftragsnr", "")).strip(),
+                    "Objekt": str(proj_rec.get("Objekt", "")).strip(),
+                    "Kunde": str(proj_rec.get("Kunde", "")).strip(),
+                    "Telefon": str(proj_rec.get("Telefon", "")).strip(),
+                    "Kontaktperson": str(proj_rec.get("Kontaktperson", "")).strip(),
+                    "Kontakttelefon": str(proj_rec.get("Kontakttelefon", "")).strip(),
+                    "EmployeeID": str(ma_sel.get("EmployeeID", "")).strip(),
+                    "Mitarbeiter": str(ma_sel.get("Name", "")).strip(),
+                    "AnkunftMagazin": ank_mag,
+                    "AbfahrtMagazin": abd_mag,
+                    "ReiseHomeToSiteMin": int(h2s),
+                    "ReiseSiteToHomeMin": int(s2h),
+                    "ReiseDirektMin": int(reise_direkt),
+                    "ReiseBezahltMin": int(reise_bezahlt_min),
+                    "ReiseRegel": reise_regel,
+                    "Reisezeit_h": float(reise_bezahlt_h),
+                    "Start": str(start_val),
+                    "Ende": str(end_val),
+                    "Pause_h": float(pause_h),
+                    "Stunden": float(hours),
+                    "Material": str(material),
+                    "Bemerkung": str(remark),
+                }
+                ok = append_report(project, row)
                 if ok:
-                    st.success("Gespeichert!")
-                    sys_time.sleep(0.3)
+                    st.success("Gespeichert ✅")
+                    sys_time.sleep(0.2)
                     st.rerun()
                 else:
-                    st.error("Speichern fehlgeschlagen (Drive). Bitte erneut versuchen.")
+                    st.error("Speichern fehlgeschlagen (Drive).")
 
         st.divider()
         st.subheader("Woche abschliessen (Signatur)")
 
         if ma_sel:
-            # Load reports for this project and employee
-            df_r, _ = get_reports_df(project)
+            df_r, _fid = get_reports(project)
             if not df_r.empty:
-                df_r2 = edited_df.copy()
+                df_r2 = df_r.copy()
                 df_r2["Datum_dt"] = pd.to_datetime(df_r2["Datum"], errors="coerce").dt.date
-                df_r2 = df_r2[df_r2["EmployeeID"].astype(str) == str(ma_sel.get("EmployeeID","")).strip()]
+                df_r2 = df_r2[df_r2["EmployeeID"].astype(str).str.strip() == str(ma_sel.get("EmployeeID", "")).strip()]
+            else:
+                df_r2 = pd.DataFrame()
 
-                # Available weeks from data
-                weeks = []
+            weeks = []
+            if not df_r2.empty and "Datum_dt" in df_r2.columns:
                 for d in df_r2["Datum_dt"].dropna().unique():
                     y, w = iso_year_week(d)
                     weeks.append((y, w))
-                weeks = sorted(set(weeks))
-            else:
-                df_r2 = pd.DataFrame()
-                weeks = []
 
-            # Add current week
             today = datetime.now().date()
             cy, cw = iso_year_week(today)
             if (cy, cw) not in weeks:
                 weeks = [(cy, cw)] + weeks
+            weeks = sorted(set(weeks), reverse=True)
 
             week_labels = [f"{y}-KW{w:02d}" for (y, w) in weeks] if weeks else [f"{cy}-KW{cw:02d}"]
             chosen = st.selectbox("Kalenderwoche", week_labels, index=0)
             y = int(chosen.split("-KW")[0])
             w = int(chosen.split("-KW")[1])
-
-            w_start, w_end = week_date_range(y, w)
-            st.caption(f"Zeitraum: {w_start.date()} – {w_end.date()}")
+            w_start, w_end = week_range(y, w)
+            st.caption(f"Zeitraum: {w_start} – {w_end}")
 
             if not df_r2.empty:
-                mask = (df_r2["Datum_dt"] >= w_start.date()) & (df_r2["Datum_dt"] <= w_end.date())
+                mask = (df_r2["Datum_dt"] >= w_start) & (df_r2["Datum_dt"] <= w_end)
                 df_week = df_r2[mask].copy()
                 total_hours = float(pd.to_numeric(df_week["Stunden"], errors="coerce").fillna(0).sum())
                 total_travel = float(pd.to_numeric(df_week["Reisezeit_h"], errors="coerce").fillna(0).sum())
             else:
-                df_week = pd.DataFrame()
                 total_hours = 0.0
                 total_travel = 0.0
 
-            csum1, csum2 = st.columns(2)
-            csum1.metric("Total Arbeitsstunden", round(total_hours, 2))
-            csum2.metric("Total Reisezeit (h)", round(total_travel, 2))
+            m1, m2 = st.columns(2)
+            m1.metric("Total Arbeitsstunden", round(total_hours, 2))
+            m2.metric("Total Reisezeit (h)", round(total_travel, 2))
 
             pin_in = st.text_input("PIN eingeben (nur für Signatur)", type="password")
             if st.button("✅ Woche abschliessen", type="primary"):
-                pin_expected = str(ma_sel.get("PIN", "")).strip()
-                if not pin_expected:
+                expected = str(ma_sel.get("PIN", "")).strip()
+                if not expected:
                     st.error("Für diesen Mitarbeiter ist kein PIN hinterlegt (Admin: Mitarbeiter bearbeiten).")
-                elif str(pin_in).strip() != pin_expected:
+                elif str(pin_in).strip() != expected:
                     st.error("PIN falsch. Keine Unterschrift.")
                 else:
-                    okc = append_closure(
-                        {
-                            "Projekt": project,
-                            "ProjektID": str(proj_rec.get("ProjektID","")).strip(),
-                            "EmployeeID": str(ma_sel.get("EmployeeID","")).strip(),
-                            "Mitarbeiter": str(ma_sel.get("Name","")).strip(),
-                            "Jahr": y,
-                            "KW": w,
-                            "Von": str(w_start.date()),
-                            "Bis": str(w_end.date()),
-                            "TotalStunden": round(total_hours, 2),
-                            "TotalReisezeit_h": round(total_travel, 2),
-                            "Timestamp": datetime.now().isoformat(timespec="seconds"),
-                            "Signed": True,
-                        }
-                    )
+                    okc = append_closure({
+                        "Projekt": project,
+                        "ProjektID": str(proj_rec.get("ProjektID", "")).strip(),
+                        "EmployeeID": str(ma_sel.get("EmployeeID", "")).strip(),
+                        "Mitarbeiter": str(ma_sel.get("Name", "")).strip(),
+                        "Jahr": str(y),
+                        "KW": str(w),
+                        "Von": str(w_start),
+                        "Bis": str(w_end),
+                        "TotalStunden": round(total_hours, 2),
+                        "TotalReisezeit_h": round(total_travel, 2),
+                        "Timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "Signed": True,
+                    })
                     if okc:
-                        # AZK updaten (Arbeits- und Reisezeit pro MA/Woche/Projekt)
-                        _ = upsert_azk_row({
+                        _ = upsert_azk({
                             "Jahr": str(y),
                             "KW": str(w),
-                            "EmployeeID": str(ma_sel.get("EmployeeID","")).strip(),
-                            "Mitarbeiter": str(ma_sel.get("Name","")).strip(),
-                            "ProjektID": str(proj_rec.get("ProjektID","")).strip(),
+                            "EmployeeID": str(ma_sel.get("EmployeeID", "")).strip(),
+                            "Mitarbeiter": str(ma_sel.get("Name", "")).strip(),
+                            "ProjektID": str(proj_rec.get("ProjektID", "")).strip(),
                             "Projekt": project,
                             "TotalStunden": round(total_hours, 2),
                             "TotalReisezeit_h": round(total_travel, 2),
@@ -1388,153 +881,17 @@ if mode == "👷 Mitarbeiter":
                         })
                         st.success("Woche abgeschlossen / signiert ✅ (AZK aktualisiert)")
                     else:
-                        st.error("Konnte Signatur nicht speichern (Drive).")
-        else:
-            st.info("Mitarbeiter auswählen, um eine Woche abzuschliessen.")
+                        st.error("Signatur speichern fehlgeschlagen (Drive).")
 
-
-
-        st.divider()
-        st.subheader("🖨️ Wochenrapport (Drucklayout wie Papier)")
-
-        if ma_sel:
-            # Wochenrapport = ZEITERFASSUNG über ALLE Baustellen/Projekte (max. 6 Baustellen pro Tag im Layout)
-            # -> Wir lesen alle *_Reports.csv und filtern nach EmployeeID
-            emp_id = str(ma_sel.get("EmployeeID", "")).strip()
-            all_projs = get_all_projects()
-            frames = []
-            for p in all_projs:
-                dfr, _ = get_reports_df(p)
-                if dfr is not None and not dfr.empty:
-                    frames.append(dfr)
-            df_tmp = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-            if not df_tmp.empty:
-                df_tmp["Datum_dt"] = pd.to_datetime(df_tmp["Datum"], errors="coerce").dt.date
-                df_tmp = df_tmp[df_tmp.get("EmployeeID", "").astype(str).str.strip() == emp_id]
-
-            # Wochenliste aus vorhandenen Daten + aktuelle Woche
-            weeks = []
-            if not df_tmp.empty and "Datum_dt" in df_tmp.columns:
-                for d in df_tmp["Datum_dt"].dropna().unique():
-                    yy, ww = iso_year_week(d)
-                    weeks.append((yy, ww))
-            today = datetime.now().date()
-            cy, cw = iso_year_week(today)
-            if (cy, cw) not in weeks:
-                weeks = [(cy, cw)] + weeks
-            weeks = sorted(set(weeks), reverse=True)
-
-            week_labels = [f"{yy}-KW{ww:02d}" for (yy, ww) in weeks] if weeks else [f"{cy}-KW{cw:02d}"]
-            chosen_w = st.selectbox("Kalenderwoche für Druck", week_labels, index=0, key="wk_print_sel")
-            yy = int(chosen_w.split("-KW")[0])
-            ww = int(chosen_w.split("-KW")[1])
-            w_start, w_end = week_date_range(yy, ww)
-
-            day_rows = []
-            for i in range(7):
-                d = (w_start + timedelta(days=i)).date()
-                if not df_tmp.empty:
-                    df_day = df_tmp[df_tmp["Datum_dt"] == d].copy()
-                else:
-                    df_day = pd.DataFrame()
-
-                total_work = float(pd.to_numeric(df_day.get("Stunden", 0), errors="coerce").fillna(0).sum()) if not df_day.empty else 0.0
-                total_travel = float(pd.to_numeric(df_day.get("Reisezeit_h", 0), errors="coerce").fillna(0).sum()) if not df_day.empty else 0.0
-                pause_h = float(pd.to_numeric(df_day.get("Pause_h", 0), errors="coerce").fillna(0).sum()) if not df_day.empty else 0.0
-
-                # Pro Tag bis zu 6 Baustellen (Projekt) ausgeben: Projekt/Baustelle + Arbeitszeit + Reisezeit
-                lines = []
-                if not df_day.empty:
-                    df_lines = df_day.copy()
-                    df_lines["Stunden_num"] = pd.to_numeric(df_lines.get("Stunden", 0), errors="coerce").fillna(0.0)
-                    df_lines["Reise_num"] = pd.to_numeric(df_lines.get("Reisezeit_h", 0), errors="coerce").fillna(0.0)
-                    # pro Projekt summieren (wenn mehrere Einträge am selben Tag)
-                    try:
-                        grp = (
-                            df_lines.groupby("Projekt", dropna=False)[["Stunden_num", "Reise_num"]]
-                            .sum()
-                            .reset_index()
-                        )
-                    except Exception:
-                        grp = df_lines[["Projekt", "Stunden_num", "Reise_num"]]
-
-                    # Sortierung: meiste Arbeitszeit zuerst
-                    grp = grp.sort_values(["Stunden_num"], ascending=False)
-
-                    for _, rr in grp.head(6).iterrows():
-                        pname = str(rr.get("Projekt", "")).strip() or project_name
-                        lines.append({
-                            "baustelle": pname,
-                            "work_h": float(rr.get("Stunden_num", 0.0) or 0.0),
-                            "travel_h": float(rr.get("Reise_num", 0.0) or 0.0),
-                        })
-
-                # auf 6 Zeilen auffüllen (für Drucklayout)
-                while len(lines) < 6:
-                    lines.append({"baustelle": "", "work_h": 0.0, "travel_h": 0.0})
-
-                ank = ""
-                abd = ""
-                if not df_day.empty and "AnkunftMagazin" in df_day.columns:
-                    vals = [str(x).strip() for x in df_day["AnkunftMagazin"].fillna("").tolist() if str(x).strip()]
-                    ank = vals[0] if vals else ""
-                if not df_day.empty and "AbfahrtMagazin" in df_day.columns:
-                    vals = [str(x).strip() for x in df_day["AbfahrtMagazin"].fillna("").tolist() if str(x).strip()]
-                    abd = vals[-1] if vals else ""
-
-                travel_min = int(round(total_travel * 60))
-
-                day_rows.append({
-                    "date": d,
-                    "ank": ank,
-                    "abd": abd,
-                    "travel_min": travel_min,
-                    "lines": lines,
-                    "total_work_h": total_work,
-                    "total_travel_h": total_travel,
-                    "pause_h": pause_h,
-                })
-
-            html_week = get_weekly_rapport_html("R. BAUMGARTNER AG", str(ma_sel.get("Name","")), chosen_w, {}, day_rows)
-            st.components.v1.html(html_week, height=900, scrolling=True)
-            st.download_button(
-                "⬇️ Wochenrapport (.html) herunterladen",
-                html_week,
-                file_name=f"Wochenrapport_{ma_sel.get('EmployeeID','')}_{chosen_w}.html",
-                mime="text/html",
-            )
-        else:
-            st.info("Bitte zuerst einen Mitarbeiter auswählen, um den Wochenrapport zu drucken.")
-
-
-
-        st.divider()
-
-        cA, cB = st.columns([0.7, 0.3])
-        cA.subheader("📌 Rapporte im Projekt (aktuell)")
-        if cB.button("🔄 Bericht aktualisieren", key="refresh_reports_emp"):
-            st.rerun()
-
-        df_h, _ = get_reports_df(project)
-        if df_h.empty:
-            st.info("Noch keine Rapporte für dieses Projekt vorhanden.")
-        else:
-            try:
-                df_view = df_h.copy()
-                df_view["Datum"] = pd.to_datetime(df_view["Datum"], errors="coerce")
-                df_view = df_view.sort_values(["Datum"], ascending=False)
-            except Exception:
-                df_view = df_h
-            st.dataframe(df_view.tail(50), use_container_width=True)
-
-
-    # --- FOTOS ---
+    # -------------------------
+    # Fotos
+    # -------------------------
     with t2:
         st.subheader("Fotos")
 
         cloudrun_upload_widget(
             project=project,
-            bucket="photos",
+            upload_type="photo",
             title="Foto(s) hochladen",
             help_text="Nur Bilder (Kamera/Galerie).",
             accept="image/*",
@@ -1542,205 +899,149 @@ if mode == "👷 Mitarbeiter":
             height=240,
         )
 
-        if st.button("🔄 Fotos aktualisieren", key="refresh_photos_emp"):
+        if st.button("🔄 Fotos aktualisieren"):
             st.rerun()
 
-        files = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
-        proj_photos = [x for x in files if x["name"].startswith(project + "_")][:60]
+        files = drive_list_files(PHOTOS_FOLDER_ID, mime_contains="image/")
+        proj_photos = [x for x in files if x["name"].startswith(project + "_")][:120]
 
         if not proj_photos:
             st.info("Keine Fotos vorhanden.")
         else:
             for f in proj_photos:
                 with st.expander(f"🖼️ {f['name']}", expanded=False):
-                    image_preview_from_drive(f["id"])
+                    safe_image_preview(f["id"])
 
-    # --- PLÄNE / DOKUMENTE (DOWNLOAD) ---
+    # -------------------------
+    # Pläne & Dokumente
+    # -------------------------
     with t3:
         st.subheader("Pläne & Dokumente")
 
-        if st.button("🔄 Pläne aktualisieren", key="refresh_docs_emp"):
+        if st.button("🔄 Pläne aktualisieren"):
             st.rerun()
 
-        files = list_files(UPLOADS_FOLDER_ID)
-        proj_docs = [x for x in files if x["name"].startswith(project + "_")][:200]
+        files = drive_list_files(PLANS_FOLDER_ID, limit=600)
+        proj_docs = [x for x in files if x["name"].startswith(project + "_")][:300]
 
         if not proj_docs:
             st.info("Keine Dokumente hinterlegt.")
         else:
             for f in proj_docs:
-                d = download_bytes(f["id"])
-                if not d:
+                data = drive_download_bytes(f["id"])
+                if not data:
                     continue
                 c1, c2 = st.columns([0.8, 0.2])
                 c1.write(f"📄 {f['name']}")
-                c2.download_button("⬇️ Download", d, file_name=f["name"])
+                c2.download_button("⬇️ Download", data, file_name=f["name"])
 
 
-# -------------------------
+# =========================================================
 # 🛠️ ADMIN
-# -------------------------
-elif mode == "🛠️ Admin":
+# =========================================================
+else:
     st.title("🛠️ Admin")
 
     pin = st.text_input("PIN", type="password")
     if pin != ADMIN_PIN:
         st.stop()
 
-    st.success("Angemeldet")
+    st.success("Angemeldet ✅")
 
-    # 🔐 Admin-Verknüpfung (für Handy / Startbildschirm)
     admin_link = f"{BASE_APP_URL}?mode=admin"
-    st.info(
-        "🔐 **Adminbereich als Verknüpfung speichern**\n\n"
-        f"👉 Öffne diesen Link: {admin_link}\n\n"
-        "• **iPhone (Safari):** Teilen → *Zum Home-Bildschirm*\n"
-        "• **Android (Chrome):** ⋮ → *Zum Startbildschirm hinzufügen*\n\n"
-        "⚠️ Zugriff nur mit Admin-PIN"
-    )
+    st.info(f"🔐 Admin-Link: {admin_link}")
     st.link_button("🔗 Admin-Link öffnen", admin_link)
 
-    tabA, tabB, tabC, tabD, tabE = st.tabs(["📌 Projekte", "📂 Uploads & Übersicht", "🧾 Rapporte", "👤 Mitarbeiter", "📤 Exporte"])
+    tabA, tabB, tabC, tabD, tabE = st.tabs(
+        ["📌 Projekte", "📂 Übersicht & Uploads", "🧾 Rapporte", "👤 Mitarbeiter", "📤 Zeitdaten (AZK/Signaturen)"]
+    )
 
-
-    # --- Projekte ---
+    # -------------------------
+    # Projekte
+    # -------------------------
     with tabA:
         st.subheader("Projekte verwalten")
-        df_p, pid = get_projects_df()
+
+        df_p, p_fid = get_projects()
 
         c1, c2 = st.columns([0.7, 0.3])
         new_p = c1.text_input("Neues Projekt")
-
         if c2.button("➕ Anlegen") and new_p.strip():
-            project_name = new_p.strip()
-            df_p = pd.concat(
-                [df_p, pd.DataFrame([{"Projekt": project_name, "Status": "aktiv"}])],
-                ignore_index=True,
-            )
-            save_projects_df(df_p, pid)
+            name = new_p.strip()
+            df_p = pd.concat([df_p, pd.DataFrame([{"Projekt": name, "Status": "aktiv"}])], ignore_index=True)
+            if save_projects(df_p, p_fid):
+                st.success(f"Projekt '{name}' angelegt.")
+                qr = generate_project_qr(name)
+                st.image(qr, width=220)
+                st.download_button("⬇️ QR-Code (.png)", qr, file_name=f"QR_{name}.png", mime="image/png")
+                sys_time.sleep(0.2)
+                st.rerun()
+            else:
+                st.error("Konnte Projects.csv nicht speichern.")
 
-            st.success(f"Projekt '{project_name}' angelegt.")
-
-            st.divider()
-            st.subheader(f"QR-Code für {project_name}")
-
-            qr_bytes = generate_project_qr(project_name)
-
-            col_qr1, col_qr2 = st.columns([0.3, 0.7])
-            col_qr1.image(qr_bytes, width=200, caption=f"Scan für {project_name}")
-
-            col_qr2.info("Diesen Code können Sie herunterladen und auf dem Rapport-Formular platzieren.")
-            col_qr2.download_button(
-                label="⬇️ QR-Code (.png) herunterladen",
-                data=qr_bytes,
-                file_name=f"QR_{project_name}.png",
-                mime="image/png",
-            )
-
+        st.divider()
         if df_p.empty:
             st.info("Noch keine Projekte.")
         else:
-            st.markdown("---")
-            st.subheader("Projektliste")
-            st.caption("Projekt-Stammdaten hier pflegen (werden im Mitarbeiter-Rapport angezeigt).")
-            df_edit = st.data_editor(
+            st.caption("Projekt-Stammdaten pflegen (werden im Mitarbeiterbereich angezeigt).")
+            edited = st.data_editor(
                 df_p,
                 use_container_width=True,
                 num_rows="dynamic",
-                disabled=["ProjektID"] if "ProjektID" in df_p.columns else [],
-                key="proj_editor",
+                disabled=["ProjektID"],
             )
-            if st.button("💾 Projekte speichern", type="primary", key="btn_save_projects"):
-                ok = save_projects_df(df_edit, pid)
-                if ok:
-                    st.success("Projekte gespeichert ✅")
+            if st.button("💾 Projekte speichern", type="primary"):
+                if save_projects(edited, p_fid):
+                    st.success("Gespeichert ✅")
                     sys_time.sleep(0.2)
                     st.rerun()
                 else:
-                    st.error("Konnte Projects.csv nicht speichern (Drive).")
+                    st.error("Speichern fehlgeschlagen (Drive).")
 
-            st.divider()
-            st.subheader("Projekt Status ändern")
-            all_projs = df_p["Projekt"].tolist()
-            sel = st.selectbox("Projekt wählen", all_projs, key="admin_status_proj")
-            new_status = st.radio(
-                "Neuer Status",
-                ["aktiv", "archiviert"],
-                horizontal=True,
-                key="admin_status_radio",
-            )
-            if st.button("Status speichern", key="admin_save_status"):
-                df_p.loc[df_p["Projekt"] == sel, "Status"] = new_status
-                save_projects_df(df_p, pid)
-                st.success("Status geändert.")
-                st.rerun()
-
-        st.divider()
-        st.subheader("🖨️ Druckvorlage erstellen (Scan-Design)")
-
-        if not df_p.empty:
-            print_proj = st.selectbox("Projekt für Druck wählen", get_active_projects(), key="print_sel")
-            if st.button("Vorschau generieren", key="btn_preview"):
-                qrb = generate_project_qr(print_proj)
-                html_code = get_printable_html(print_proj, qrb)
-
-                st.components.v1.html(html_code, height=600, scrolling=True)
-                st.download_button(
-                    label="Druckdatei (.html) herunterladen",
-                    data=html_code,
-                    file_name=f"Rapport_{print_proj}.html",
-                    mime="text/html",
-                )
-
-    # --- Uploads & Übersicht ---
+    # -------------------------
+    # Übersicht & Uploads (wie Mitarbeiter + Löschen)
+    # -------------------------
     with tabB:
-        st.subheader("Uploads & Übersicht (wie Mitarbeiter, plus Löschen)")
+        st.subheader("Übersicht & Uploads (Admin)")
 
-        projs_all = get_all_projects()
-        if not projs_all:
+        if not all_projects:
             st.info("Erstelle zuerst ein Projekt.")
             st.stop()
 
-        sel_p = st.selectbox("Projekt", projs_all, key="admin_sel_project_upload")
+        sel_p = st.selectbox("Projekt", all_projects, key="admin_sel_project")
 
         cX, cY = st.columns(2)
 
         with cX:
-            st.markdown("### 📷 Fotos (Upload via Cloud Run)")
+            st.markdown("### 📷 Fotos (Cloud Run)")
             cloudrun_upload_widget(
                 project=sel_p,
-                bucket="photos",
+                upload_type="photo",
                 title="Foto(s) hochladen",
-                help_text="Nur Bilder (Kamera/Galerie).",
+                help_text="Mobil stabil (Kamera/Galerie).",
                 accept="image/*",
                 multiple=True,
                 height=240,
             )
 
         with cY:
-            st.markdown("### 📄 Pläne/Dokumente (Upload direkt nach Drive)")
-            st.caption("Dieser Upload ist bewusst im Adminbereich (PC zuverlässig; Handy je nach Browser).")
+            st.markdown("### 📄 Pläne/Dokumente (direkt nach Drive)")
+            st.caption("Admin-Upload (PC stabil). Dateien werden mit Projekt-Präfix gespeichert.")
 
-            admin_docs_files = st.file_uploader(
-                "Dokumente auswählen",
-                type=None,
-                accept_multiple_files=True,
-                key="admin_docs_uploader",
-            )
-
-            if st.button("📤 Dokument(e) speichern", type="primary", key="admin_docs_upload_btn"):
-                if not admin_docs_files:
-                    st.warning("Bitte zuerst Dokumente auswählen.")
+            docs = st.file_uploader("Dokumente auswählen", accept_multiple_files=True, key="adm_docs")
+            if st.button("📤 Dokument(e) speichern", type="primary"):
+                if not docs:
+                    st.warning("Bitte zuerst Dateien auswählen.")
                 else:
                     ok_n = 0
                     fail_n = 0
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    for f in admin_docs_files:
+                    for f in docs:
                         try:
                             data = f.getvalue()
                             mime = getattr(f, "type", None) or "application/octet-stream"
-                            filename = f"{sel_p}_{ts}_{f.name}"
-                            if upload_bytes_to_drive(data, UPLOADS_FOLDER_ID, filename, mime):
+                            fname = f"{sel_p}_{ts}_{f.name}"
+                            if drive_upload_bytes(data, PLANS_FOLDER_ID, fname, mime):
                                 ok_n += 1
                             else:
                                 fail_n += 1
@@ -1748,121 +1049,108 @@ elif mode == "🛠️ Admin":
                             fail_n += 1
 
                     if fail_n == 0:
-                        st.success(f"✅ {ok_n} Datei(en) in Drive gespeichert.")
+                        st.success(f"✅ {ok_n} Datei(en) gespeichert.")
                     else:
                         st.warning(f"⚠️ {ok_n} ok, {fail_n} fehlgeschlagen.")
-
                     sys_time.sleep(0.2)
                     st.rerun()
 
         st.divider()
 
-        tabF, tabDocs = st.tabs(["📷 Fotos – Übersicht", "📄 Pläne/Dokumente – Übersicht"])
+        tabF, tabD = st.tabs(["📷 Fotos – Übersicht", "📄 Pläne/Dokumente – Übersicht"])
 
         with tabF:
-            c1, c2 = st.columns([0.7, 0.3])
-            c1.subheader("📷 Fotos – Vorschau")
-            if c2.button("🔄 Aktualisieren", key="admin_refresh_photos"):
+            if st.button("🔄 Fotos aktualisieren", key="adm_ref_ph"):
                 st.rerun()
-
-            files_ph = list_files(PHOTOS_FOLDER_ID, mime_prefix="image/")
-            admin_photos = [x for x in files_ph if x["name"].startswith(sel_p + "_")][:180]
-
-            if not admin_photos:
+            files = drive_list_files(PHOTOS_FOLDER_ID, mime_contains="image/", limit=800)
+            items = [x for x in files if x["name"].startswith(sel_p + "_")][:240]
+            if not items:
                 st.info("Keine Fotos vorhanden.")
             else:
                 cols = st.columns(3)
-                for idx, f in enumerate(admin_photos):
-                    col = cols[idx % 3]
-                    with col:
+                for i, f in enumerate(items):
+                    with cols[i % 3]:
                         with st.expander(f"🖼️ {f['name']}", expanded=False):
-                            image_preview_from_drive(f["id"])
-                            if st.button("🗑 Foto löschen", key=f"adm_del_photo_{f['id']}"):
-                                delete_file(f["id"])
-                                st.success("Gelöscht.")
-                                sys_time.sleep(0.2)
-                                st.rerun()
+                            safe_image_preview(f["id"])
+                            if st.button("🗑 Foto löschen", key=f"del_ph_{f['id']}"):
+                                if drive_delete(f["id"]):
+                                    st.success("Gelöscht ✅")
+                                    sys_time.sleep(0.2)
+                                    st.rerun()
 
-        with tabDocs:
-            c1, c2 = st.columns([0.7, 0.3])
-            c1.subheader("📄 Pläne/Dokumente – Download")
-            if c2.button("🔄 Aktualisieren", key="admin_refresh_docs"):
+        with tabD:
+            if st.button("🔄 Pläne aktualisieren", key="adm_ref_docs"):
                 st.rerun()
-
-            files_docs = list_files(UPLOADS_FOLDER_ID)
-            admin_docs = [x for x in files_docs if x["name"].startswith(sel_p + "_")][:400]
-
-            if not admin_docs:
+            files = drive_list_files(PLANS_FOLDER_ID, limit=800)
+            items = [x for x in files if x["name"].startswith(sel_p + "_")][:500]
+            if not items:
                 st.info("Keine Dokumente vorhanden.")
             else:
-                for f in admin_docs:
-                    d = download_bytes(f["id"])
-                    if not d:
+                for f in items:
+                    data = drive_download_bytes(f["id"])
+                    if not data:
                         continue
                     a1, a2, a3 = st.columns([0.65, 0.2, 0.15])
                     a1.write(f"📄 {f['name']}")
-                    a2.download_button("⬇️ Download", d, file_name=f["name"])
-                    if a3.button("🗑", key=f"adm_del_doc_{f['id']}"):
-                        delete_file(f["id"])
-                        st.success("Gelöscht.")
-                        sys_time.sleep(0.2)
-                        st.rerun()
+                    a2.download_button("⬇️ Download", data, file_name=f["name"])
+                    if a3.button("🗑", key=f"del_doc_{f['id']}"):
+                        if drive_delete(f["id"]):
+                            st.success("Gelöscht ✅")
+                            sys_time.sleep(0.2)
+                            st.rerun()
 
-    # --- Rapporte ---
+    # -------------------------
+    # Rapporte ansehen + editieren
+    # -------------------------
     with tabC:
-        st.subheader("Rapporte ansehen")
+        st.subheader("Rapporte (pro Projekt)")
 
-        projs = get_all_projects()
-        if not projs:
+        if not all_projects:
             st.info("Keine Projekte vorhanden.")
             st.stop()
 
-        sel_rp = st.selectbox("Projekt", projs, key="admin_sel_reports")
-        if st.button("🔄 Rapporte aktualisieren", key="admin_refresh_reports"):
-            st.rerun()
+        sel = st.selectbox("Projekt", all_projects, key="adm_rep_proj")
+        df_r, rep_fid = get_reports(sel)
 
-        df_r, _ = get_reports_df(sel_rp)
         if df_r.empty:
             st.info("Keine Rapporte vorhanden.")
         else:
-            try:
-                df_view = df_r.copy()
-                df_view["Datum"] = pd.to_datetime(df_view["Datum"], errors="coerce")
-                df_view = df_view.sort_values(["Datum"], ascending=False)
-            except Exception:
-                df_view = df_r
+            st.caption("Hier kannst du Rapporte kontrollieren und korrigieren. Speichern aktualisiert die CSV in Drive.")
+            edited = st.data_editor(df_r, use_container_width=True, num_rows="dynamic", key=f"ed_rep_{sel}")
 
-            st.dataframe(df_view, use_container_width=True)
-            st.download_button(
-                "⬇️ Rapporte als CSV herunterladen",
-                df_view.to_csv(index=False).encode("utf-8"),
-                file_name=f"{sel_rp}_Reports.csv",
+            c1, c2 = st.columns([0.25, 0.75])
+            if c1.button("💾 Speichern", type="primary"):
+                if save_reports(sel, edited, rep_fid):
+                    st.success("Gespeichert ✅")
+                    sys_time.sleep(0.2)
+                    st.rerun()
+                else:
+                    st.error("Speichern fehlgeschlagen (Drive).")
+
+            c2.download_button(
+                "⬇️ CSV herunterladen",
+                edited.to_csv(index=False).encode("utf-8"),
+                file_name=f"{sel}_Reports.csv",
+                mime="text/csv",
             )
 
-
-    # --- Mitarbeiter ---
+    # -------------------------
+    # Mitarbeiter
+    # -------------------------
     with tabD:
         st.subheader("Mitarbeiter verwalten")
         st.caption("PIN wird nur für Wochenabschluss/Signatur verwendet (kein Login).")
 
-        df_emp, emp_fid = get_employees_df()
+        df_emp, emp_fid = get_employees()
 
-        if df_emp.empty:
-            st.info("Noch keine Mitarbeiter vorhanden. Füge unten eine Zeile hinzu.")
-            df_emp = pd.DataFrame(columns=EMPLOYEES_COLS)
-
-
-        # --- Streamlit data_editor ist streng bei Datentypen: daher hier normalisieren ---
+        # datentypen glätten
         df_emp = df_emp.copy()
         for c in EMPLOYEES_COLS:
             if c not in df_emp.columns:
                 df_emp[c] = ""
-        # Strings
         for c in ["EmployeeID", "Name", "Rolle", "PIN", "Status"]:
             df_emp[c] = df_emp[c].astype(str).replace("nan", "").fillna("").str.strip()
-        # Stundenlohn numerisch
         df_emp["Stundenlohn"] = pd.to_numeric(df_emp["Stundenlohn"], errors="coerce").fillna(0.0)
-        # Status nur aktiv/inaktiv
         df_emp["Status"] = df_emp["Status"].apply(lambda x: x if x in ["aktiv", "inaktiv"] else "aktiv")
 
         edited = st.data_editor(
@@ -1870,190 +1158,49 @@ elif mode == "🛠️ Admin":
             use_container_width=True,
             num_rows="dynamic",
             column_config={
-                "EmployeeID": st.column_config.TextColumn("EmployeeID"),
-                "Name": st.column_config.TextColumn("Name"),
-                "Rolle": st.column_config.TextColumn("Rolle"),
-                "Stundenlohn": st.column_config.NumberColumn("Stundenlohn", step=0.05),
-                "PIN": st.column_config.TextColumn("PIN"),
                 "Status": st.column_config.SelectboxColumn("Status", options=["aktiv", "inaktiv"]),
+                "Stundenlohn": st.column_config.NumberColumn("Stundenlohn", step=0.05),
             },
-            key="emp_editor",
         )
 
         if st.button("💾 Mitarbeiter speichern", type="primary"):
-            df_save = edited.copy()
-            # Basic cleanup
-            df_save["EmployeeID"] = df_save["EmployeeID"].astype(str).str.strip()
-            df_save["Name"] = df_save["Name"].astype(str).str.strip()
-            df_save["PIN"] = df_save["PIN"].astype(str).str.strip()
-            df_save["Status"] = df_save["Status"].fillna("aktiv").replace("", "aktiv")
-
-            # Auto-generate EmployeeID if missing
-            for idx, row in df_save.iterrows():
-                if not str(row.get("EmployeeID", "")).strip() and str(row.get("Name", "")).strip():
-                    base = re.sub(r"[^A-Za-z0-9]+", "", str(row["Name"]).upper())[:6]
-                    df_save.at[idx, "EmployeeID"] = base or str(uuid4())[:6].upper()
-
-            ok = save_employees_df(df_save, emp_fid)
-            if ok:
-                st.success("Mitarbeiter gespeichert ✅")
+            if save_employees(edited, emp_fid):
+                st.success("Gespeichert ✅")
                 sys_time.sleep(0.2)
                 st.rerun()
             else:
-                st.error("Konnte Employees.csv nicht speichern (Drive).")
+                st.error("Speichern fehlgeschlagen (Drive).")
 
-        st.divider()
-        st.subheader("Wochenabschlüsse / Signaturen (Übersicht)")
-        df_cl, cl_fid = get_closures_df()
+    # -------------------------
+    # Zeitdaten: Closures + AZK
+    # -------------------------
+    with tabE:
+        st.subheader("Zeitdaten (AZK / Wochenabschlüsse)")
+
+        df_cl, cl_fid = get_closures()
+        df_azk, azk_fid = get_azk()
+
+        st.markdown("### ✅ Wochenabschlüsse / Signaturen (Closures.csv)")
         if df_cl.empty:
             st.info("Noch keine Wochenabschlüsse vorhanden.")
         else:
             st.dataframe(df_cl.sort_values(["Jahr", "KW"], ascending=False), use_container_width=True)
             st.download_button(
-                "⬇️ Closures.csv herunterladen",
+                "⬇️ Closures.csv",
                 df_cl.to_csv(index=False).encode("utf-8"),
                 file_name="Closures.csv",
+                mime="text/csv",
             )
 
-            st.caption("Reversibel: Admin kann einzelne Einträge entfernen.")
-            del_idx = st.number_input("Zeilenindex löschen (0..n-1)", min_value=0, max_value=max(0, len(df_cl) - 1), value=0, step=1)
-            if st.button("🗑️ Signatur-Zeile löschen"):
-                df2 = df_cl.drop(index=int(del_idx)).reset_index(drop=True)
-                ok = update_file_in_drive(cl_fid, df2.to_csv(index=False).encode("utf-8"), mimetype="text/csv") if cl_fid else upload_bytes_to_drive(df2.to_csv(index=False).encode("utf-8"), REPORTS_FOLDER_ID, CLOSURES_CSV_NAME, "text/csv")
-                if ok:
-                    st.success("Gelöscht ✅")
-                    sys_time.sleep(0.2)
-                    st.rerun()
-                else:
-                    st.error("Löschen fehlgeschlagen (Drive).")
-
-    # --- Exporte ---
-    with tabE:
-        st.subheader("Exporte")
-        projs = get_all_projects()
-        if not projs:
-            st.info("Keine Projekte vorhanden.")
+        st.divider()
+        st.markdown("### 📊 AZK (AZK.csv) – Summen pro MA/Woche/Projekt")
+        if df_azk.empty:
+            st.info("AZK ist leer (wird beim Wochenabschluss automatisch upsertet).")
         else:
-            sel = st.selectbox("Projekt für Export", projs, key="exp_proj")
-            df_r, rep_file_id = get_reports_df(sel)
-            if df_r.empty:
-                st.info("Keine Rapporte für dieses Projekt.")
-            else:
-                st.markdown('### ✏️ Rapporte bearbeiten (vor Export)')
-                st.caption('Änderungen hier speichern -> aktualisiert die CSV in Google Drive. Danach Exporte herunterladen.')
-
-                # Editor
-                edited_df = st.data_editor(
-                    df_r,
-                    use_container_width=True,
-                    num_rows='dynamic',
-                    key=f'edit_reports_{sel}',
-                )
-
-                c1, c2 = st.columns([1, 3])
-                if c1.button('💾 Änderungen speichern', key=f'save_reports_{sel}'): 
-                    ok = save_reports_df(sel, edited_df, rep_file_id)
-                    if ok:
-                        st.success('Gespeichert ✅ (Drive aktualisiert)')
-                        sys_time.sleep(0.2)
-                        st.rerun()
-                    else:
-                        st.error('Speichern fehlgeschlagen (Drive).')
-
-                st.divider()
-
-                # Normalize types
-
-                df_r2 = edited_df.copy()
-                df_r2["Datum_dt"] = pd.to_datetime(df_r2["Datum"], errors="coerce").dt.date
-                df_r2["Stunden_num"] = pd.to_numeric(df_r2["Stunden"], errors="coerce").fillna(0.0)
-                reise_series = df_r2["Reisezeit_h"] if "Reisezeit_h" in df_r2.columns else pd.Series([0.0] * len(df_r2))
-                df_r2["Reise_num"] = pd.to_numeric(reise_series, errors="coerce").fillna(0.0)
-
-                # 1) Baustellenrapporte-Layout (CSV)
-                st.markdown("### Export: Baustellenrapporte (CSV)")
-                export_cols = [
-                    "Jahr",
-                    "KW",
-                    "Auftrag erfasst!!",
-                    "Rechnung gestellt",
-                    "Zeit Stempel",
-                    "Firma",
-                    "Baustelle",
-                    "MA",
-                    "Datum",
-                    "Vormittag ab",
-                    "Vormittag bis",
-                    "Std. Vorm.",
-                    "Nachmittag ab",
-                    "Nachmittag bis",
-                    "Std. Nachm.",
-                    "Kürzel",
-                    "Notizen/Spezieles",
-                    "Total Std. V. & N.",
-                ]
-                rows = []
-                for _, r in df_r2.iterrows():
-                    d = r.get("Datum_dt")
-                    if pd.isna(d) or d is None:
-                        continue
-                    y, w = iso_year_week(d)
-                    rows.append(
-                        {
-                            "Jahr": y,
-                            "KW": w,
-                            "Auftrag erfasst!!": "",
-                            "Rechnung gestellt": "",
-                            "Zeit Stempel": "",
-                            "Firma": "RBAG",
-                            "Baustelle": sel,
-                            "MA": str(r.get("Mitarbeiter", "")),
-                            "Datum": str(d),
-                            "Vormittag ab": str(r.get("Start", "")),
-                            "Vormittag bis": str(r.get("Ende", "")),
-                            "Std. Vorm.": float(r.get("Stunden_num", 0.0)),
-                            "Nachmittag ab": "",
-                            "Nachmittag bis": "",
-                            "Std. Nachm.": "",
-                            "Kürzel": str(r.get("EmployeeID", "")),
-                            "Notizen/Spezieles": str(r.get("Bemerkung", "")),
-                            "Total Std. V. & N.": float(r.get("Stunden_num", 0.0)),
-                        }
-                    )
-                df_exp = pd.DataFrame(rows, columns=export_cols)
-                st.download_button(
-                    "⬇️ Baustellenrapporte_export.csv",
-                    df_exp.to_csv(index=False).encode("utf-8"),
-                    file_name=f"{sel}_Baustellenrapporte_export.csv",
-                )
-
-                # 2) AZK-Basisexport (CSV)
-                st.markdown("### Export: AZK Basis (CSV)")
-                df_azk = df_r2.rename(
-                    columns={
-                        "Projekt": "Projekt",
-                        "EmployeeID": "EmployeeID",
-                        "Mitarbeiter": "Mitarbeiter",
-                        "Stunden_num": "Stunden",
-                        "Reise_num": "Reisezeit_h",
-                        "Material": "Material",
-                        "Bemerkung": "Bemerkung",
-                    }
-                )
-                df_azk_out = pd.DataFrame(
-                    {
-                        "Datum": df_azk["Datum_dt"].astype(str),
-                        "Projekt": sel,
-                        "EmployeeID": df_azk.get("EmployeeID", "").astype(str),
-                        "Mitarbeiter": df_azk.get("Mitarbeiter", "").astype(str),
-                        "Stunden": df_r2["Stunden_num"],
-                        "Reisezeit_h": df_r2["Reise_num"],
-                        "Material": df_r2.get("Material", "").astype(str),
-                        "Bemerkung": df_r2.get("Bemerkung", "").astype(str),
-                    }
-                )
-                st.download_button(
-                    "⬇️ AZK_Rapporte_export.csv",
-                    df_azk_out.to_csv(index=False).encode("utf-8"),
-                    file_name=f"{sel}_AZK_Rapporte_export.csv",
-                )
+            st.dataframe(df_azk.sort_values(["Jahr", "KW"], ascending=False), use_container_width=True)
+            st.download_button(
+                "⬇️ AZK.csv",
+                df_azk.to_csv(index=False).encode("utf-8"),
+                file_name="AZK.csv",
+                mime="text/csv",
+            )
