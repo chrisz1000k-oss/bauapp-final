@@ -290,7 +290,8 @@ def cloudrun_upload_widget(
           try {
             const resp = await fetch(url + "/upload", {
               method: "POST",
-              headers: { "X-Upload-Token": token },
+              headers: { headers: { "Authorization": "Bearer " + token },
+ },
               body: fd
             });
 
