@@ -1,87 +1,77 @@
-import io
-from typing import Optional, Tuple, List, Dict
-
+import streamlit as st
 import pandas as pd
+import io
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
+# --- AUTHENTIFIZIERUNG ---
+def get_drive_service():
+    """Erstellt die Verbindung zu Google Drive basierend auf secrets.toml"""
+    # Prüfen ob Token in secrets existiert
+    if "GOOGLE_REFRESH_TOKEN" not in st.secrets:
+        return None
 
-def list_files(drive, folder_id: str) -> List[Dict]:
-    q = f"'{folder_id}' in parents and trashed=false"
-    res = drive.files().list(
-        q=q,
-        pageSize=500,
-        fields="files(id,name,mimeType,createdTime)",
-        orderBy="createdTime desc",
-    ).execute()
-    return res.get("files", [])
+    creds = Credentials(
+        None,
+        refresh_token=st.secrets["GOOGLE_REFRESH_TOKEN"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=st.secrets["GOOGLE_CLIENT_ID"],
+        client_secret=st.secrets["GOOGLE_CLIENT_SECRET"],
+    )
+    return build('drive', 'v3', credentials=creds)
 
-
-def find_file_id(drive, folder_id: str, filename: str) -> Optional[str]:
-    files = list_files(drive, folder_id)
-    hit = next((f for f in files if f["name"] == filename), None)
-    return hit["id"] if hit else None
-
-
-def download_bytes(drive, file_id: str) -> Optional[bytes]:
+# --- DATEI OPERATIONEN ---
+def get_file_id(service, folder_id, filename):
+    """Sucht eine Datei im Ordner und gibt die ID zurück"""
     try:
-        request = drive.files().get_media(fileId=file_id)
+        query = f"'{folder_id}' in parents and name = '{filename}' and trashed = false"
+        results = service.files().list(q=query, fields="files(id)").execute()
+        files = results.get('files', [])
+        return files[0]['id'] if files else None
+    except Exception as e:
+        st.error(f"Verbindungsfehler bei Suche nach '{filename}': {e}")
+        return None
+
+def read_csv(service, folder_id, filename):
+    """Lädt eine CSV-Datei aus Drive in ein Pandas DataFrame"""
+    file_id = get_file_id(service, folder_id, filename)
+    
+    if not file_id:
+        return pd.DataFrame(), None # Datei existiert noch nicht
+
+    try:
+        request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while not done:
-            _, done = downloader.next_chunk()
-        return fh.getvalue()
-    except Exception:
-        return None
-
-
-def upload_bytes(drive, *, data: bytes, folder_id: str, filename: str, mimetype: str) -> str:
-    file_metadata = {"name": filename, "parents": [folder_id]}
-    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=True)
-    created = drive.files().create(body=file_metadata, media_body=media, fields="id").execute()
-    return created["id"]
-
-
-def update_bytes(drive, *, file_id: str, data: bytes, mimetype: str) -> None:
-    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=True)
-    drive.files().update(fileId=file_id, media_body=media).execute()
-
-
-def load_csv(drive, *, folder_id: str, filename: str) -> Tuple[pd.DataFrame, Optional[str]]:
-    file_id = find_file_id(drive, folder_id, filename)
-    if not file_id:
-        return pd.DataFrame(), None
-    b = download_bytes(drive, file_id)
-    if not b:
-        return pd.DataFrame(), file_id
-    try:
-        return pd.read_csv(io.BytesIO(b)), file_id
-    except Exception:
+            status, done = downloader.next_chunk()
+        
+        fh.seek(0)
+        return pd.read_csv(fh), file_id
+    except Exception as e:
+        # Falls Datei leer oder defekt, leeres DataFrame zurückgeben
         return pd.DataFrame(), file_id
 
-
-def save_csv(drive, *, folder_id: str, filename: str, df: pd.DataFrame, file_id: Optional[str]) -> str:
-    data = df.to_csv(index=False).encode("utf-8")
+def save_csv(service, folder_id, filename, df, file_id=None):
+    """Speichert (überschreibt) ein DataFrame als CSV in Drive"""
+    csv_buffer = io.BytesIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_bytes = csv_buffer.getvalue()
+    
+    media = MediaIoBaseUpload(io.BytesIO(csv_bytes), mimetype='text/csv', resumable=True)
+    
     if file_id:
-        update_bytes(drive, file_id=file_id, data=data, mimetype="text/csv")
-        return file_id
-    return upload_bytes(drive, data=data, folder_id=folder_id, filename=filename, mimetype="text/csv")
+        # Update bestehende Datei
+        service.files().update(fileId=file_id, media_body=media).execute()
+    else:
+        # Erstelle neue Datei
+        file_metadata = {'name': filename, 'parents': [folder_id]}
+        service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
-
-def ensure_subfolder(drive, parent_id: str, folder_name: str) -> str:
-    files = list_files(drive, parent_id)
-    hit = next(
-        (f for f in files if f["name"] == folder_name and f["mimeType"] == "application/vnd.google-apps.folder"),
-        None
-    )
-    if hit:
-        return hit["id"]
-
-    folder_metadata = {
-        "name": folder_name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id]
-    }
-    created = drive.files().create(body=folder_metadata, fields="id").execute()
-    return created["id"]
-
+def upload_image(service, folder_id, filename, file_obj, mime_type):
+    """Lädt ein Bild direkt hoch"""
+    media = MediaIoBaseUpload(file_obj, mimetype=mime_type, resumable=True)
+    file_metadata = {'name': filename, 'parents': [folder_id]}
+    service.files().create(body=file_metadata, media_body=media, fields='id').execute()
