@@ -18,13 +18,15 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- STATE INIT ---
+# --- STATE INIT (Neu strukturiert für klare Navigation) ---
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "user_role" not in st.session_state:
     st.session_state["user_role"] = ""
 if "user_name" not in st.session_state:
     st.session_state["user_name"] = ""
+if "view" not in st.session_state:
+    st.session_state["view"] = "Start" # App startet jetzt zwingend im Hauptmenü
 
 def main():
     # 1. Verbindung herstellen
@@ -35,64 +37,85 @@ def main():
         st.stop()
 
     if not service:
-        st.warning("⚠️ Keine Verbindung zu Google Drive. Token fehlt.")
+        st.warning("⚠️ Keine Verbindung zu Google Drive. Token fehlt oder ist abgelaufen.")
         st.stop()
 
-    # 2. IDs aus Secrets laden (Jetzt 4 Ordner)
+    # 2. IDs aus Secrets laden (4 Ordner)
     try:
-        # Ordner 1: Fotos
         PHOTOS_FID = st.secrets["PHOTOS_FOLDER_ID"]
-        # Ordner 2: Arbeitsrapporte (Baustellen-Logbuch)
         PROJEKT_RAPPORTE_FID = st.secrets["PROJECT_REPORTS_FOLDER_ID"]
-        # Ordner 3: Arbeitszeit (AKZ/Lohn)
         ZEIT_RAPPORTE_FID = st.secrets["TIME_REPORTS_FOLDER_ID"]
-        # Ordner 4: Pläne (Optional, falls genutzt)
         PLAENE_FID = st.secrets.get("PLANS_FOLDER_ID", "")
         
-        ADMIN_PIN = st.secrets["ADMIN_PIN"]
+        # Falls ADMIN_PIN im Block [general] steht, holt Streamlit es so automatisch:
+        ADMIN_PIN = st.secrets.get("ADMIN_PIN", st.secrets.get("general", {}).get("ADMIN_PIN", "1234"))
     except KeyError as e:
-        st.error(f"Konfigurationsfehler: Der Eintrag {e} fehlt in der secrets.toml")
+        st.error(f"Konfigurationsfehler: Der Eintrag {e} fehlt in den Streamlit Secrets")
         st.stop()
 
-    # --- LOGIN SCREEN ---
-    if not st.session_state["logged_in"]:
-        st.title("🔐 BauApp Login")
-        col1, col2 = st.columns([1,2])
-        with col1:
-            pin = st.text_input("PIN eingeben", type="password")
-            if st.button("Anmelden", type="primary"):
-                if pin == ADMIN_PIN:
-                    st.session_state["logged_in"] = True
-                    st.session_state["user_role"] = "Admin"
-                    st.session_state["user_name"] = "Administrator"
-                    st.rerun()
-                elif len(pin) > 0:
-                    # Mitarbeiter Login
-                    st.session_state["logged_in"] = True
-                    st.session_state["user_role"] = "Mitarbeiter"
-                    st.session_state["user_name"] = "Mitarbeiter" 
-                    st.rerun()
-        return
-
-    # --- SIDEBAR ---
-    st.sidebar.title(f"👤 {st.session_state['user_role']}")
-    if st.sidebar.button("Abmelden"):
-        st.session_state["logged_in"] = False
-        st.rerun()
-
-    # Projektliste laden (Liegt im Projekt-Ordner)
-    df_proj, _ = ds.read_csv(service, PROJEKT_RAPPORTE_FID, "Projects.csv")
-    if not df_proj.empty and "Projekt" in df_proj.columns:
-        projects = df_proj["Projekt"].tolist()
-    else:
-        projects = ["Allgemein", "Baustelle A", "Baustelle B"]
 
     # =========================================================
-    # ROLLE: MITARBEITER
+    # ANSICHT 1: STARTSEITE (HAUPTMENÜ)
     # =========================================================
-    if st.session_state["user_role"] == "Mitarbeiter":
-        st.header("📋 Rapportierung")
+    if st.session_state["view"] == "Start":
+        st.title("🏗️ Willkommen bei der BauApp")
+        st.write("Bitte wählen Sie Ihren Bereich aus:")
         
+        st.write("") # Abstand
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("👷‍♂️ Mitarbeiter-Bereich", use_container_width=True):
+                st.session_state["user_role"] = "Mitarbeiter"
+                st.session_state["user_name"] = "Mitarbeiter"
+                st.session_state["view"] = "Mitarbeiter"
+                st.rerun()
+        with col2:
+            if st.button("🔐 Admin-Bereich", use_container_width=True):
+                st.session_state["view"] = "Admin_Login"
+                st.rerun()
+
+
+    # =========================================================
+    # ANSICHT 2: ADMIN LOGIN
+    # =========================================================
+    elif st.session_state["view"] == "Admin_Login":
+        if st.button("⬅️ Zurück zur Startseite"):
+            st.session_state["view"] = "Start"
+            st.rerun()
+            
+        st.title("🔐 Admin Login")
+        pin_input = st.text_input("PIN eingeben", type="password")
+        
+        if st.button("Anmelden", type="primary"):
+            if pin_input == ADMIN_PIN:
+                st.session_state["logged_in"] = True
+                st.session_state["user_role"] = "Admin"
+                st.session_state["user_name"] = "Administrator"
+                st.session_state["view"] = "Admin_Dashboard"
+                st.rerun()
+            else:
+                st.error("Falsche PIN")
+
+
+    # =========================================================
+    # ANSICHT 3: MITARBEITER BEREICH
+    # =========================================================
+    elif st.session_state["view"] == "Mitarbeiter":
+        col_back, col_title = st.columns([1, 4])
+        with col_back:
+            if st.button("⬅️ Zurück zum Start"):
+                st.session_state["view"] = "Start"
+                st.rerun()
+        with col_title:
+            st.header("📋 Rapportierung")
+        
+        # Projektliste laden
+        df_proj, _ = ds.read_csv(service, PROJEKT_RAPPORTE_FID, "Projects.csv")
+        if not df_proj.empty and "Projekt" in df_proj.columns:
+            projects = df_proj["Projekt"].tolist()
+        else:
+            projects = ["Allgemein", "Baustelle A", "Baustelle B"]
+
         sel_proj = st.selectbox("Projekt auswählen", projects)
         
         tab1, tab2 = st.tabs(["📝 Rapport (Zeit & Arbeit)", "📷 Fotos"])
@@ -117,7 +140,7 @@ def main():
                 f_bem = st.text_input("Interne Bemerkung")
                 
                 if st.form_submit_button("💾 Rapport speichern", type="primary"):
-                    # 1. Berechnungen
+                    # Berechnungen
                     t1 = datetime.combine(f_date, f_start)
                     t2 = datetime.combine(f_date, f_end)
                     diff = (t2 - t1).total_seconds() / 3600
@@ -128,7 +151,7 @@ def main():
                     else:
                         ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         
-                        # DATENSATZ A: Für die Projektleitung (Beschreibung & Material)
+                        # DATENSATZ A: Für die Projektleitung
                         row_projekt = {
                             "Erfasst": ts_str,
                             "Datum": f_date.strftime("%Y-%m-%d"),
@@ -140,7 +163,7 @@ def main():
                             "Status": "DRAFT"
                         }
                         
-                        # DATENSATZ B: Für die Lohnbuchhaltung/AKZ (Zeit & Zahlen)
+                        # DATENSATZ B: Für die Lohnbuchhaltung
                         row_zeit = {
                             "Erfasst": ts_str,
                             "Datum": f_date.strftime("%Y-%m-%d"),
@@ -154,12 +177,12 @@ def main():
                             "Status": "DRAFT"
                         }
                         
-                        # 2. Speichern in ORDNER PROJEKT RAPPORTE
+                        # Speichern in ORDNER PROJEKT RAPPORTE
                         df_p, fid_p = ds.read_csv(service, PROJEKT_RAPPORTE_FID, "Baustellen_Rapport.csv")
                         df_p = pd.concat([df_p, pd.DataFrame([row_projekt])], ignore_index=True)
                         ds.save_csv(service, PROJEKT_RAPPORTE_FID, "Baustellen_Rapport.csv", df_p, fid_p)
                         
-                        # 3. Speichern in ORDNER ZEIT RAPPORTE
+                        # Speichern in ORDNER ZEIT RAPPORTE
                         df_z, fid_z = ds.read_csv(service, ZEIT_RAPPORTE_FID, "Arbeitszeit_AKZ.csv")
                         df_z = pd.concat([df_z, pd.DataFrame([row_zeit])], ignore_index=True)
                         ds.save_csv(service, ZEIT_RAPPORTE_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
@@ -176,7 +199,6 @@ def main():
                     prog = st.progress(0)
                     for idx, f in enumerate(files):
                         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        # Name: Projekt_Datum_Original
                         fname = f"{sel_proj}_{ts}_{f.name}"
                         ds.upload_image(service, PHOTOS_FID, fname, io.BytesIO(f.getvalue()), f.type)
                         prog.progress((idx + 1) / len(files))
@@ -184,11 +206,20 @@ def main():
                     time.sleep(1)
                     st.rerun()
 
+
     # =========================================================
-    # ROLLE: ADMIN
+    # ANSICHT 4: ADMIN DASHBOARD
     # =========================================================
-    elif st.session_state["user_role"] == "Admin":
-        st.header("🛠️ Admin Zentrale")
+    elif st.session_state["view"] == "Admin_Dashboard":
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.header("🛠️ Admin Zentrale")
+        with col2:
+            if st.button("🚪 Abmelden", use_container_width=True):
+                st.session_state["logged_in"] = False
+                st.session_state["user_role"] = ""
+                st.session_state["view"] = "Start"
+                st.rerun()
         
         t_zeit, t_bau, t_stam = st.tabs(["🕒 AKZ / Zeiten", "🏗️ Baustellen-Rapporte", "⚙️ Stammdaten"])
         
