@@ -68,6 +68,19 @@ def render_header():
         st.markdown("<h1 style='color:#1E3A8A; margin-top:0px;'>R. Baumgartner AG</h1>", unsafe_allow_html=True)
     st.divider()
 
+def align_project_dataframe(df):
+    """Prithvi-Sicherung: Stellt sicher, dass alle neuen Dimensionen existieren, ohne alte Daten zu zerstören."""
+    expected_cols = [
+        "Projekt_ID", "Auftragsnummer", "Projekt_Name", "Status", 
+        "Kunde_Name", "Kunde_Adresse", "Kunde_Email", "Kunde_Telefon", "Kunde_Kontakt",
+        "Fuge_Zement", "Fuge_Silikon", "Asbest_Gefahr"
+    ]
+    for col in expected_cols:
+        if col not in df.columns:
+            # Asbest hat Tamas-Vigilanz (Standard: Unbekannt/Prüfen)
+            df[col] = "Nein" if col == "Asbest_Gefahr" else ""
+    return df
+
 def process_rapport_saving(service, f_date, f_hours, f_arbeit, f_mat, f_bem, sel_proj, PROJEKT_FID, ZEIT_FID):
     if sel_proj == "Bitte Projekte im Admin-Bereich anlegen":
         st.error("Bitte wähle ein gültiges Projekt aus.")
@@ -75,33 +88,9 @@ def process_rapport_saving(service, f_date, f_hours, f_arbeit, f_mat, f_bem, sel
         
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Projekt-Rapport (Fokus auf ausgeführte Arbeiten und Material)
-    row_projekt = {
-        "Erfasst": ts_str, 
-        "Datum": f_date.strftime("%Y-%m-%d"), 
-        "Projekt": sel_proj, 
-        "Mitarbeiter": st.session_state["user_name"], 
-        "Arbeit": f_arbeit, 
-        "Material": f_mat, 
-        "Bemerkung": f_bem, 
-        "Status": "DRAFT"
-    }
+    row_projekt = {"Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"), "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Arbeit": f_arbeit, "Material": f_mat, "Bemerkung": f_bem, "Status": "DRAFT"}
+    row_zeit = {"Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"), "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Start": "-", "Ende": "-", "Pause": 0, "Stunden_Total": f_hours, "Reise_Min": 0, "Status": "DRAFT"}
     
-    # Zeit-Rapport (Start/Ende/Pause durch Platzhalter ersetzt, um Struktur zu wahren. Fokus auf Gesamtstunden)
-    row_zeit = {
-        "Erfasst": ts_str, 
-        "Datum": f_date.strftime("%Y-%m-%d"), 
-        "Projekt": sel_proj, 
-        "Mitarbeiter": st.session_state["user_name"], 
-        "Start": "-", 
-        "Ende": "-", 
-        "Pause": 0, 
-        "Stunden_Total": f_hours, 
-        "Reise_Min": 0, 
-        "Status": "DRAFT"
-    }
-    
-    # Prithvi: Stabile Speicherung
     df_p, fid_p = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
     df_p = pd.concat([df_p, pd.DataFrame([row_projekt])], ignore_index=True)
     ds.save_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv", df_p, fid_p)
@@ -208,8 +197,34 @@ def main_flow():
             st.subheader(f"📋 Rapport: {st.session_state['user_name']}")
         
         df_proj, _ = ds.read_csv(service, PROJEKT_FID, "Projects.csv")
-        active_projs = df_proj[df_proj["Status"] == "Aktiv"]["Projekt_Name"].tolist() if not df_proj.empty and "Status" in df_proj.columns else ["Bitte Projekte im Admin-Bereich anlegen"]
+        df_proj = align_project_dataframe(df_proj) # Prithvi-Sicherung
+        
+        active_projs = df_proj[df_proj["Status"] == "Aktiv"]["Projekt_Name"].tolist() if not df_proj.empty else ["Bitte Projekte im Admin-Bereich anlegen"]
         selected_project = st.selectbox("Projekt:", active_projs)
+        
+        # --- SPIEGELUNG DER KUNDEN- & STOFFDATEN (Vayu-Interaktion) ---
+        if selected_project != "Bitte Projekte im Admin-Bereich anlegen":
+            proj_data = df_proj[df_proj["Projekt_Name"] == selected_project].iloc[0]
+            with st.expander("ℹ️ Projekt-Matrix (Kunde & Material)", expanded=True):
+                c_info, m_info = st.columns(2)
+                with c_info:
+                    st.markdown("**👤 Kunden-Kontakt**")
+                    st.write(f"**Name:** {proj_data.get('Kunde_Name', '-')}")
+                    st.write(f"**Adresse:** {proj_data.get('Kunde_Adresse', '-')}")
+                    st.write(f"**Kontaktperson:** {proj_data.get('Kunde_Kontakt', '-')}")
+                    st.write(f"**Telefon:** {proj_data.get('Kunde_Telefon', '-')}")
+                with m_info:
+                    st.markdown("**🧱 Stoffliche Alchemie**")
+                    st.write(f"**Zementfuge:** {proj_data.get('Fuge_Zement', '-')}")
+                    st.write(f"**Silikonfuge:** {proj_data.get('Fuge_Silikon', '-')}")
+                    
+                    # Tamas-Vigilanz (Asbest-Warnung)
+                    asbest_status = str(proj_data.get('Asbest_Gefahr', 'Nein')).strip().lower()
+                    if asbest_status == "ja":
+                        st.error("⚠️ **ACHTUNG: ASBEST VORHANDEN!** Schutzmaßnahmen zwingend einhalten.")
+                    else:
+                        st.success("✅ Asbest-Status: Unbedenklich / Nein")
+        st.write("") # Akasha Raum
         
         tab1, tab2, tab3, tab4 = st.tabs(["📝 Rapport", "📤 Upload", "🖼️ Pläne & Fotos", "📜 Projekt-Historie"])
         
@@ -219,10 +234,8 @@ def main_flow():
                 with col_a:
                     f_date = st.date_input("Datum", datetime.now())
                 with col_b:
-                    # Reduktion auf die Essenz: Gesamtstunden
                     f_hours = st.number_input("Gesamtstunden", min_value=0.0, value=8.5, step=0.25)
                 
-                # Orthografische Integrität
                 f_arbeit = st.text_area("Ausgeführte Arbeiten")
                 f_mat = st.text_area("Materialeinsatz")
                 f_bem = st.text_input("Bemerkung / Behinderungen")
@@ -279,7 +292,6 @@ def main_flow():
                     st.info("Noch keine Rapporte für dieses Projekt.")
                 else:
                     for _, row in df_proj_hist.head(PAGINATION_LIMIT).iterrows():
-                        # Transparenz: Alles Wesentliche auf einen Blick
                         with st.expander(f"🗓️ {row['Datum']} | 👷‍♂️ {row['Mitarbeiter']} | ⏱️ {row.get('Stunden_Total', '-')} Std."):
                             st.markdown(f"**Ausgeführte Arbeiten:**\n{row.get('Arbeit', '-')}")
                             st.markdown(f"**Materialeinsatz:**\n{row.get('Material', '-')}")
@@ -299,7 +311,7 @@ def main_flow():
                 st.session_state["view"] = "Start"
                 st.rerun()
         
-        t_zeit, t_bau, t_stam, t_docs, t_print = st.tabs(["🕒 AKZ", "🏗️ Rapporte", "⚙️ Stammdaten", "📂 Pläne & Medien", "🖨️ Druckvorlagen"])
+        t_zeit, t_bau, t_stam, t_docs, t_print = st.tabs(["🕒 AKZ", "🏗️ Rapporte", "⚙️ Stammdaten", "📂 Medien", "🖨️ Druck"])
         
         with t_zeit:
             df_z, fid_z = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
@@ -318,10 +330,13 @@ def main_flow():
                     st.success("Gespeichert.")
 
         with t_stam:
-            st.markdown("**🏗️ Projekte**")
+            st.markdown("**🏗️ Projekte & Kunden-Kunda**")
             df_proj, fid_proj = ds.read_csv(service, PROJEKT_FID, "Projects.csv")
-            if df_proj.empty or "Auftragsnummer" not in df_proj.columns:
-                df_proj = pd.DataFrame({"Projekt_ID": ["P100"], "Auftragsnummer": ["A-01"], "Projekt_Name": ["Baustelle A"], "Status": ["Aktiv"]})
+            df_proj = align_project_dataframe(df_proj) # Prithvi-Sicherung erzwingt alle Spalten
+            
+            if df_proj.empty:
+                df_proj = pd.DataFrame({"Projekt_ID": ["P100"], "Auftragsnummer": ["A-01"], "Projekt_Name": ["Baustelle A"], "Status": ["Aktiv"], "Kunde_Name": [""], "Kunde_Adresse": [""], "Kunde_Email": [""], "Kunde_Telefon": [""], "Kunde_Kontakt": [""], "Fuge_Zement": [""], "Fuge_Silikon": [""], "Asbest_Gefahr": ["Nein"]})
+            
             edit_proj = st.data_editor(df_proj, num_rows="dynamic", key="e_proj", use_container_width=True)
             if st.button("💾 Projekte Sichern"): ds.save_csv(service, PROJEKT_FID, "Projects.csv", edit_proj, fid_proj)
 
@@ -366,20 +381,30 @@ def main_flow():
                             else: st.download_button(label=f"📥 {img['name'][:15]}...", data=img_bytes, file_name=img['name'])
 
         with t_print:
-            st.markdown("**Skalierbare Druckvorlage (Fokus auf Ausgeführte Arbeiten)**")
-            st.write("Die Zeit-Spalten wurden auf die Essenz reduziert, um massiven Raum für die Dokumentation zu schaffen.")
+            st.markdown("**Das Artefakt: Skalierbare Druckvorlage inkl. Projekt-Spezifikationen**")
             
             print_proj = st.selectbox("Projekt für Druckvorlage:", active_projs, key="admin_print_sel")
             
             if st.button("🖨️ Druckvorlage generieren", type="primary"):
                 if print_proj != "Keine Projekte gefunden":
+                    # Projekt-Daten für den Druck extrahieren
+                    proj_row = df_proj[df_proj["Projekt_Name"] == print_proj].iloc[0]
+                    k_name = proj_row.get("Kunde_Name", "")
+                    k_adresse = proj_row.get("Kunde_Adresse", "")
+                    k_kontakt = proj_row.get("Kunde_Kontakt", "")
+                    f_zem = proj_row.get("Fuge_Zement", "")
+                    f_sil = proj_row.get("Fuge_Silikon", "")
+                    asbest = str(proj_row.get("Asbest_Gefahr", "Nein")).strip()
+                    
+                    asbest_html = f"<p style='color:red; font-weight:bold; font-size: 14px; margin-top:5px;'>⚠️ ASBEST GEFAHR: JA</p>" if asbest.lower() == "ja" else "<p style='color:green; font-size: 12px; margin-top:5px;'>✅ Asbest: Nein / Unbedenklich</p>"
+
                     safe_proj_name = urllib.parse.quote(print_proj)
                     qr_url = f"{BASE_URL}?projekt={safe_proj_name}"
-                    qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(qr_url)}"
+                    qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={urllib.parse.quote(qr_url)}"
                     
-                    # 5 Spalten statt 6. Reduziert auf das Wesentliche.
                     table_rows = "".join(["<tr><td></td><td></td><td></td><td></td><td></td></tr>" for _ in range(15)])
                     
+                    # Akasha-Grid (3 Säulen im Header)
                     html_content = f"""
                     <!DOCTYPE html>
                     <html>
@@ -388,10 +413,14 @@ def main_flow():
                         <style>
                             @page {{ size: A4; margin: 15mm; }}
                             body {{ font-family: Arial, sans-serif; color: #333; font-size: 12px; margin: 0; padding: 0; }}
-                            .header {{ display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #1E3A8A; padding-bottom: 15px; margin-bottom: 15px; }}
-                            .title-area h1 {{ color: #1E3A8A; margin: 0; font-size: 24px; }}
-                            .title-area h2 {{ margin: 5px 0 0 0; color: #555; font-size: 18px; }}
-                            .qr-area {{ text-align: center; }}
+                            .header-grid {{ display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #1E3A8A; padding-bottom: 27px; margin-bottom: 27px; }}
+                            .col-firm {{ width: 30%; }}
+                            .col-specs {{ width: 45%; border-left: 1px solid #ccc; padding-left: 27px; }}
+                            .col-qr {{ width: 20%; text-align: right; }}
+                            h1 {{ color: #1E3A8A; margin: 0; font-size: 24px; }}
+                            h2 {{ margin: 5px 0 15px 0; color: #555; font-size: 16px; }}
+                            h3 {{ margin: 0 0 5px 0; font-size: 14px; color: #1E3A8A; }}
+                            .specs-text {{ margin: 2px 0; font-size: 12px; }}
                             .qr-area img {{ border: 1px solid #ccc; padding: 3px; width: 100px; height: 100px; }}
                             table {{ width: 100%; border-collapse: collapse; page-break-inside: auto; }}
                             tr {{ page-break-inside: avoid; page-break-after: auto; }}
@@ -401,15 +430,24 @@ def main_flow():
                         </style>
                     </head>
                     <body>
-                        <div class="header">
-                            <div class="title-area">
+                        <div class="header-grid">
+                            <div class="col-firm">
                                 <h1>R. Baumgartner AG</h1>
-                                <h2>Arbeitsrapport (Backup / Projektbericht)</h2>
-                                <p style="font-size: 14px;"><strong>Projekt:</strong> {print_proj}</p>
+                                <h2>Arbeitsrapport (Backup)</h2>
+                                <p class="specs-text"><strong>Projekt:</strong><br>{print_proj}</p>
                             </div>
-                            <div class="qr-area">
-                                <img src="{qr_api_url}" alt="QR Code">
-                                <p style="font-size:10px; margin-top:5px;">Zum digitalen<br>Rapport scannen</p>
+                            <div class="col-specs">
+                                <h3>Kunde & Ort</h3>
+                                <p class="specs-text">{k_name}<br>{k_adresse}<br>Kontakt: {k_kontakt}</p>
+                                <h3 style="margin-top: 10px;">Stoffliche Alchemie</h3>
+                                <p class="specs-text">Zementfuge: {f_zem} | Silikonfuge: {f_sil}</p>
+                                {asbest_html}
+                            </div>
+                            <div class="col-qr">
+                                <div class="qr-area">
+                                    <img src="{qr_api_url}" alt="QR Code">
+                                    <p style="font-size:10px; margin-top:5px; text-align:center;">Zum digitalen<br>Rapport scannen</p>
+                                </div>
                             </div>
                         </div>
                         <table>
