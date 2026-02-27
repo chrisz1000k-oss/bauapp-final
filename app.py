@@ -69,7 +69,6 @@ def render_header():
     st.divider()
 
 def align_project_dataframe(df):
-    """Prithvi-Sicherung: Stellt sicher, dass alle neuen Dimensionen existieren, ohne alte Daten zu zerstören."""
     expected_cols = [
         "Projekt_ID", "Auftragsnummer", "Projekt_Name", "Status", 
         "Kunde_Name", "Kunde_Adresse", "Kunde_Email", "Kunde_Telefon", "Kunde_Kontakt",
@@ -77,29 +76,66 @@ def align_project_dataframe(df):
     ]
     for col in expected_cols:
         if col not in df.columns:
-            # Asbest hat Tamas-Vigilanz (Standard: Unbekannt/Prüfen)
             df[col] = "Nein" if col == "Asbest_Gefahr" else ""
     return df
 
-def process_rapport_saving(service, f_date, f_hours, f_arbeit, f_mat, f_bem, sel_proj, PROJEKT_FID, ZEIT_FID):
+def align_zeit_dataframe(df):
+    """Prithvi-Sicherung für die neuen AZK-Spalten (SPV Reisezeit & Status)"""
+    expected_cols = ["Reisezeit_bezahlt_Min", "Arbeitszeit_inkl_Reisezeit", "Status"]
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = 0 if "Min" in col or "Arbeitszeit" in col else "ENTWURF"
+    return df
+
+def process_rapport_saving(service, f_date, f_hours, f_arbeit, f_mat, f_bem, sel_proj, f_route, f_hin, f_rueck, PROJEKT_FID, ZEIT_FID):
     if sel_proj == "Bitte Projekte im Admin-Bereich anlegen":
         st.error("Bitte wähle ein gültiges Projekt aus.")
         return
         
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    row_projekt = {"Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"), "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Arbeit": f_arbeit, "Material": f_mat, "Bemerkung": f_bem, "Status": "DRAFT"}
-    row_zeit = {"Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"), "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Start": "-", "Ende": "-", "Pause": 0, "Stunden_Total": f_hours, "Reise_Min": 0, "Status": "DRAFT"}
+    # SPV HARD-CODED-DHARMA: Reisezeit-Logik
+    if f_route == "Über Magazin":
+        reise_min_bezahlt = 0
+    else:
+        # Direkter Weg: Pro Weg werden 30 Minuten Opfergabe (ungeschuldet) abgezogen
+        bezahlt_hin = max(0, f_hin - 30)
+        bezahlt_rueck = max(0, f_rueck - 30)
+        reise_min_bezahlt = bezahlt_hin + bezahlt_rueck
+        
+    reise_stunden_bezahlt = round(reise_min_bezahlt / 60, 2)
+    total_inkl_reise = round(f_hours + reise_stunden_bezahlt, 2)
     
+    # Projekt-Rapport 
+    row_projekt = {
+        "Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"), 
+        "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], 
+        "Arbeit": f_arbeit, "Material": f_mat, "Bemerkung": f_bem, "Status": "ENTWURF"
+    }
+    
+    # AZK Zeit-Rapport (Mit SPV Spalten)
+    row_zeit = {
+        "Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"), 
+        "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], 
+        "Start": "-", "Ende": "-", "Pause": 0, 
+        "Stunden_Total": f_hours, 
+        "Fahrtweg_Typ": f_route,
+        "Reisezeit_bezahlt_Min": reise_min_bezahlt,
+        "Arbeitszeit_inkl_Reisezeit": total_inkl_reise,
+        "Status": "ENTWURF"
+    }
+    
+    # Speichern
     df_p, fid_p = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
     df_p = pd.concat([df_p, pd.DataFrame([row_projekt])], ignore_index=True)
     ds.save_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv", df_p, fid_p)
     
     df_z, fid_z = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
+    df_z = align_zeit_dataframe(df_z)
     df_z = pd.concat([df_z, pd.DataFrame([row_zeit])], ignore_index=True)
     ds.save_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
     
-    st.success("✅ Rapport erfolgreich in der Essenz gespeichert.")
+    st.success(f"✅ Rapport erfasst. Bezahlte Reisezeit: {reise_min_bezahlt} Min. Gesamtstunden AZK: {total_inkl_reise} Std.")
 
 # ==========================================
 # HAUPT-LOGIK
@@ -197,51 +233,48 @@ def main_flow():
             st.subheader(f"📋 Rapport: {st.session_state['user_name']}")
         
         df_proj, _ = ds.read_csv(service, PROJEKT_FID, "Projects.csv")
-        df_proj = align_project_dataframe(df_proj) # Prithvi-Sicherung
+        df_proj = align_project_dataframe(df_proj)
         
         active_projs = df_proj[df_proj["Status"] == "Aktiv"]["Projekt_Name"].tolist() if not df_proj.empty else ["Bitte Projekte im Admin-Bereich anlegen"]
         selected_project = st.selectbox("Projekt:", active_projs)
         
-        # --- SPIEGELUNG DER KUNDEN- & STOFFDATEN (Vayu-Interaktion) ---
         if selected_project != "Bitte Projekte im Admin-Bereich anlegen":
             proj_data = df_proj[df_proj["Projekt_Name"] == selected_project].iloc[0]
-            with st.expander("ℹ️ Projekt-Matrix (Kunde & Material)", expanded=True):
+            with st.expander("ℹ️ Projekt-Matrix (Kunde & Material)", expanded=False):
                 c_info, m_info = st.columns(2)
                 with c_info:
-                    st.markdown("**👤 Kunden-Kontakt**")
-                    st.write(f"**Name:** {proj_data.get('Kunde_Name', '-')}")
-                    st.write(f"**Adresse:** {proj_data.get('Kunde_Adresse', '-')}")
-                    st.write(f"**Kontaktperson:** {proj_data.get('Kunde_Kontakt', '-')}")
+                    st.write(f"**Kunde:** {proj_data.get('Kunde_Name', '-')} | {proj_data.get('Kunde_Adresse', '-')}")
                     st.write(f"**Telefon:** {proj_data.get('Kunde_Telefon', '-')}")
                 with m_info:
-                    st.markdown("**🧱 Stoffliche Alchemie**")
-                    st.write(f"**Zementfuge:** {proj_data.get('Fuge_Zement', '-')}")
-                    st.write(f"**Silikonfuge:** {proj_data.get('Fuge_Silikon', '-')}")
-                    
-                    # Tamas-Vigilanz (Asbest-Warnung)
-                    asbest_status = str(proj_data.get('Asbest_Gefahr', 'Nein')).strip().lower()
-                    if asbest_status == "ja":
-                        st.error("⚠️ **ACHTUNG: ASBEST VORHANDEN!** Schutzmaßnahmen zwingend einhalten.")
-                    else:
-                        st.success("✅ Asbest-Status: Unbedenklich / Nein")
-        st.write("") # Akasha Raum
+                    st.write(f"**Fugen (Zement/Silikon):** {proj_data.get('Fuge_Zement', '-')} / {proj_data.get('Fuge_Silikon', '-')}")
+                    if str(proj_data.get('Asbest_Gefahr', 'Nein')).strip().lower() == "ja":
+                        st.error("⚠️ ASBEST VORHANDEN")
+        st.write("") 
         
-        tab1, tab2, tab3, tab4 = st.tabs(["📝 Rapport", "📤 Upload", "🖼️ Pläne & Fotos", "📜 Projekt-Historie"])
+        tab1, tab2, tab3, tab4 = st.tabs(["📝 Rapport", "📤 Medien", "🖼️ Galerie", "📜 Projekt-Historie & Signatur"])
         
         with tab1:
             with st.form("ma_form"):
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    f_date = st.date_input("Datum", datetime.now())
-                with col_b:
-                    f_hours = st.number_input("Gesamtstunden", min_value=0.0, value=8.5, step=0.25)
+                f_date = st.date_input("Datum", datetime.now())
                 
+                # SPV Reisezeit-Modul
+                st.markdown("**🚗 Reisezeit & Vayu-Navigation**")
+                f_route = st.radio("Fahrtweg", ["Direkt (Wohnort ↔ Baustelle)", "Über Magazin"], horizontal=True)
+                col_r1, col_r2 = st.columns(2)
+                with col_r1:
+                    f_hin = st.number_input("Fahrtzeit Hinweg (Min)", value=0, step=5, help="Tatsächliche Zeit. Das System zieht autom. 30 Min ab.")
+                with col_r2:
+                    f_rueck = st.number_input("Fahrtzeit Rückweg (Min)", value=0, step=5)
+                
+                st.divider()
+                st.markdown("**👷‍♂️ Arbeitsleistung**")
+                f_hours = st.number_input("Arbeitsstunden (Gesamt auf Baustelle)", min_value=0.0, value=8.5, step=0.25)
                 f_arbeit = st.text_area("Ausgeführte Arbeiten")
                 f_mat = st.text_area("Materialeinsatz")
                 f_bem = st.text_input("Bemerkung / Behinderungen")
                 
-                if st.form_submit_button("💾 Speichern", type="primary"):
-                    process_rapport_saving(service, f_date, f_hours, f_arbeit, f_mat, f_bem, selected_project, PROJEKT_FID, ZEIT_FID)
+                if st.form_submit_button("💾 Rapport zur Freigabe einreichen", type="primary"):
+                    process_rapport_saving(service, f_date, f_hours, f_arbeit, f_mat, f_bem, selected_project, f_route, f_hin, f_rueck, PROJEKT_FID, ZEIT_FID)
 
         with tab2:
             st.info(f"Medien für: **{selected_project}**")
@@ -258,45 +291,53 @@ def main_flow():
                 st.rerun()
 
         with tab3:
-            if st.button("🔄 Ansicht aktualisieren"):
-                st.cache_data.clear()
-                st.rerun()
-                
+            if st.button("🔄 Ansicht aktualisieren"): st.cache_data.clear()
             all_files = []
             if PHOTOS_FID: all_files.extend(load_project_files_flowing(service, PHOTOS_FID, selected_project))
             if PLAENE_FID: all_files.extend(load_project_files_flowing(service, PLAENE_FID, selected_project))
             
-            if not all_files:
-                st.info("Noch keine Fotos oder Pläne vorhanden.")
+            if not all_files: st.info("Noch keine Fotos oder Pläne vorhanden.")
             else:
                 cols = st.columns(3)
                 for idx, img in enumerate(all_files):
                     with cols[idx % 3]:
                         img_bytes = get_file_bytes_flowing(service, img['id'])
                         if img_bytes:
-                            if img['name'].lower().endswith(('.png', '.jpg', '.jpeg')):
-                                st.image(img_bytes, caption=img['name'], use_container_width=True)
-                            else:
-                                st.download_button(label=f"📥 {img['name']}", data=img_bytes, file_name=img['name'])
+                            if img['name'].lower().endswith(('.png', '.jpg', '.jpeg')): st.image(img_bytes, caption=img['name'], use_container_width=True)
+                            else: st.download_button(label=f"📥 {img['name']}", data=img_bytes, file_name=img['name'])
                                 
         with tab4:
-            st.markdown(f"**Projekt-Historie: {selected_project}**")
+            st.markdown(f"**Freigabe & Historie: {selected_project}**")
             df_hist_p, _ = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
-            df_hist_z, _ = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
+            df_hist_z, fid_z = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
             
             if not df_hist_p.empty and not df_hist_z.empty and "Erfasst" in df_hist_p.columns and "Erfasst" in df_hist_z.columns:
-                df_merged = pd.merge(df_hist_p, df_hist_z[["Erfasst", "Stunden_Total"]], on="Erfasst", how="left")
-                df_proj_hist = df_merged[df_merged["Projekt"] == selected_project].sort_values(by="Datum", ascending=False)
+                df_hist_z = align_zeit_dataframe(df_hist_z)
+                df_merged = pd.merge(df_hist_p, df_hist_z[["Erfasst", "Arbeitszeit_inkl_Reisezeit", "Status"]], on="Erfasst", how="left")
+                df_proj_hist = df_merged[(df_merged["Projekt"] == selected_project) & (df_merged["Mitarbeiter"] == st.session_state["user_name"])].sort_values(by="Datum", ascending=False)
                 
                 if df_proj_hist.empty:
-                    st.info("Noch keine Rapporte für dieses Projekt.")
+                    st.info("Noch keine eigenen Rapporte für dieses Projekt.")
                 else:
                     for _, row in df_proj_hist.head(PAGINATION_LIMIT).iterrows():
-                        with st.expander(f"🗓️ {row['Datum']} | 👷‍♂️ {row['Mitarbeiter']} | ⏱️ {row.get('Stunden_Total', '-')} Std."):
+                        status_color = "🔴" if row.get("Status") == "ENTWURF" else "🟡" if row.get("Status") == "FREIGEGEBEN" else "🟢"
+                        
+                        with st.expander(f"{status_color} {row['Datum']} | AZK Total: {row.get('Arbeitszeit_inkl_Reisezeit', '-')} Std. | Status: {row.get('Status', 'ENTWURF')}"):
                             st.markdown(f"**Ausgeführte Arbeiten:**\n{row.get('Arbeit', '-')}")
                             st.markdown(f"**Materialeinsatz:**\n{row.get('Material', '-')}")
-            else:
-                st.info("Datenbasis noch unvollständig.")
+                            
+                            # Die Signatur-Logik
+                            if row.get("Status") == "FREIGEGEBEN":
+                                st.warning("Dieser Rapport wurde vom Admin geprüft. Bitte durch Klick unterschreiben/versiegeln.")
+                                if st.button(f"✍️ Woche {row['Datum']} Signieren", key=f"sig_{row['Erfasst']}"):
+                                    # Update in der originalen Zeit-Tabelle
+                                    idx_to_update = df_hist_z[df_hist_z['Erfasst'] == row['Erfasst']].index
+                                    if not idx_to_update.empty:
+                                        df_hist_z.loc[idx_to_update, "Status"] = "SIGNIERT"
+                                        ds.save_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv", df_hist_z, fid_z)
+                                        st.success("Erfolgreich signiert!")
+                                        time.sleep(1)
+                                        st.rerun()
 
     # ---------------------------------------------------------
     # ADMIN DASHBOARD
@@ -311,15 +352,23 @@ def main_flow():
                 st.session_state["view"] = "Start"
                 st.rerun()
         
-        t_zeit, t_bau, t_stam, t_docs, t_print = st.tabs(["🕒 AKZ", "🏗️ Rapporte", "⚙️ Stammdaten", "📂 Medien", "🖨️ Druck"])
+        t_zeit, t_bau, t_stam, t_docs, t_print = st.tabs(["🕒 AKZ / Freigabe", "🏗️ Rapporte", "⚙️ Stammdaten", "📂 Medien", "🖨️ Druck"])
         
         with t_zeit:
+            st.markdown("**Admin-Kontrolle: Entwürfe prüfen & Freigeben**")
+            st.write("Setze den Status auf 'FREIGEGEBEN', damit der Mitarbeiter signieren kann.")
             df_z, fid_z = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
             if not df_z.empty:
+                df_z = align_zeit_dataframe(df_z)
+                # Sortiere, damit ENTWURF oben steht
+                df_z['Sort_Order'] = df_z['Status'].map({'ENTWURF': 1, 'FREIGEGEBEN': 2, 'SIGNIERT': 3}).fillna(4)
+                df_z = df_z.sort_values(by=['Sort_Order', 'Datum'])
+                df_z = df_z.drop(columns=['Sort_Order'])
+                
                 edit_z = st.data_editor(df_z, num_rows="dynamic", use_container_width=True)
-                if st.button("💾 Speichern (AKZ)", type="primary"):
+                if st.button("💾 Speichern & Freigeben (AKZ)", type="primary"):
                     ds.save_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv", edit_z, fid_z)
-                    st.success("Gespeichert.")
+                    st.success("AZK-Status aktualisiert.")
 
         with t_bau:
             df_p, fid_p = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
@@ -330,10 +379,9 @@ def main_flow():
                     st.success("Gespeichert.")
 
         with t_stam:
-            st.markdown("**🏗️ Projekte & Kunden-Kunda**")
+            st.markdown("**🏗️ Projekte (Archivierung = Moksha)**")
             df_proj, fid_proj = ds.read_csv(service, PROJEKT_FID, "Projects.csv")
-            df_proj = align_project_dataframe(df_proj) # Prithvi-Sicherung erzwingt alle Spalten
-            
+            df_proj = align_project_dataframe(df_proj)
             if df_proj.empty:
                 df_proj = pd.DataFrame({"Projekt_ID": ["P100"], "Auftragsnummer": ["A-01"], "Projekt_Name": ["Baustelle A"], "Status": ["Aktiv"], "Kunde_Name": [""], "Kunde_Adresse": [""], "Kunde_Email": [""], "Kunde_Telefon": [""], "Kunde_Kontakt": [""], "Fuge_Zement": [""], "Fuge_Silikon": [""], "Asbest_Gefahr": ["Nein"]})
             
@@ -382,12 +430,10 @@ def main_flow():
 
         with t_print:
             st.markdown("**Das Artefakt: Skalierbare Druckvorlage inkl. Projekt-Spezifikationen**")
-            
             print_proj = st.selectbox("Projekt für Druckvorlage:", active_projs, key="admin_print_sel")
             
             if st.button("🖨️ Druckvorlage generieren", type="primary"):
                 if print_proj != "Keine Projekte gefunden":
-                    # Projekt-Daten für den Druck extrahieren
                     proj_row = df_proj[df_proj["Projekt_Name"] == print_proj].iloc[0]
                     k_name = proj_row.get("Kunde_Name", "")
                     k_adresse = proj_row.get("Kunde_Adresse", "")
@@ -404,7 +450,6 @@ def main_flow():
                     
                     table_rows = "".join(["<tr><td></td><td></td><td></td><td></td><td></td></tr>" for _ in range(15)])
                     
-                    # Akasha-Grid (3 Säulen im Header)
                     html_content = f"""
                     <!DOCTYPE html>
                     <html>
