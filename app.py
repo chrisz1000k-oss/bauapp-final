@@ -5,10 +5,25 @@ import time
 import io
 from googleapiclient.http import MediaIoBaseDownload
 
-# Import unseres Backend-Moduls
 import drive_store as ds
 
-# --- KONFIGURATION ---
+# ==========================================
+# AKASHA (Raum) & NUMEROLOGISCHE FREQUENZEN
+# ==========================================
+# 108er-Konstante: Universelle Vollendung für Caching und Puffer
+CACHE_TTL_SECONDS = 108        
+MAX_IMAGE_BUFFER = 108         
+
+# 27er-Regel: Resonanz für Listen-Darstellungen und Chunking
+PAGINATION_LIMIT = 27          
+
+# 114er-Integrität: Die App ist konzeptionell in 114 UI-Knoten aufteilbar.
+# Hier definieren wir den Basis-Port als symbolischen Anker.
+COSMIC_PORT = 11400            
+
+# ==========================================
+# PRITHVI (Erde): Konfiguration & Stabilität
+# ==========================================
 st.set_page_config(page_title="R. Baumgartner AG - BauApp", layout="wide")
 
 st.markdown("""
@@ -19,66 +34,52 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- HILFSFUNKTIONEN FÜR BILDER ---
-@st.cache_data(ttl=60, show_spinner=False)
-def load_project_images(_service, folder_id, project_name):
-    """Sucht in Drive nach Fotos, die zum Projekt gehören"""
+
+# ==========================================
+# JALA (Wasser): Fließende, entkoppelte Helfer
+# ==========================================
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def load_project_images_flowing(_service, folder_id: str, project_name: str) -> list:
+    """Jala & Agni: Lädt Bilder schnell und fließend aus dem Cache."""
     query = f"'{folder_id}' in parents and name contains '{project_name}' and trashed = false"
     try:
         results = _service.files().list(q=query, fields="files(id, name)").execute()
-        return results.get('files', [])
-    except Exception:
+        return results.get('files', [])[:MAX_IMAGE_BUFFER] # 108er Limit
+    except Exception as error:
+        st.error(f"Prithvi-Fehler im Datenstrom: {error}")
         return []
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_image_bytes(_service, file_id):
-    """Lädt die Bilddaten aus Drive herunter"""
+@st.cache_data(ttl=CACHE_TTL_SECONDS * 10, show_spinner=False)
+def get_image_bytes_flowing(_service, file_id: str):
+    """Moksha: Sichert den Download-Stream vor Abbrüchen."""
     try:
         request = _service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
+        file_handler = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_handler, request)
         done = False
         while not done:
             _, done = downloader.next_chunk()
-        return fh.getvalue()
+        return file_handler.getvalue()
     except Exception:
         return None
 
-# --- STATE INIT ---
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
-if "user_role" not in st.session_state:
-    st.session_state["user_role"] = ""
-if "user_name" not in st.session_state:
-    st.session_state["user_name"] = ""
-if "view" not in st.session_state:
-    st.session_state["view"] = "Start"
 
-def main():
-    # 1. Verbindung herstellen
-    try:
-        service = ds.get_drive_service()
-    except Exception:
-        st.error("Kritischer Fehler: secrets.toml ist nicht korrekt konfiguriert.")
-        st.stop()
+# ==========================================
+# VAYU (Luft): Leichtgewichtige UI-Komponenten (Modularität)
+# ==========================================
+def init_cosmic_state():
+    """Setzt den Grundzustand des Mandalas (Session State)."""
+    if "logged_in" not in st.session_state:
+        st.session_state["logged_in"] = False
+    if "user_role" not in st.session_state:
+        st.session_state["user_role"] = ""
+    if "user_name" not in st.session_state:
+        st.session_state["user_name"] = ""
+    if "view" not in st.session_state:
+        st.session_state["view"] = "Start"
 
-    if not service:
-        st.warning("⚠️ Keine Verbindung zu Google Drive. Token fehlt oder ist abgelaufen.")
-        st.stop()
-
-    # 2. IDs aus Secrets laden
-    try:
-        PHOTOS_FID = st.secrets["general"]["PHOTOS_FOLDER_ID"] if "general" in st.secrets else st.secrets["PHOTOS_FOLDER_ID"]
-        PROJEKT_RAPPORTE_FID = st.secrets["general"]["PROJECT_REPORTS_FOLDER_ID"] if "general" in st.secrets else st.secrets["PROJECT_REPORTS_FOLDER_ID"]
-        ZEIT_RAPPORTE_FID = st.secrets["general"]["TIME_REPORTS_FOLDER_ID"] if "general" in st.secrets else st.secrets["TIME_REPORTS_FOLDER_ID"]
-        
-        # PIN abrufen (versucht verschiedene Ebenen in der toml)
-        ADMIN_PIN = st.secrets.get("ADMIN_PIN", st.secrets.get("general", {}).get("ADMIN_PIN", "1234"))
-    except KeyError as e:
-        st.error(f"Konfigurationsfehler: Der Eintrag {e} fehlt in den Streamlit Secrets")
-        st.stop()
-
-    # --- KOPFZEILE (Logo & Name) ---
+def render_header():
+    """Kama-Trikona: Harmonische Kopfzeile."""
     col_logo, col_name = st.columns([1, 6])
     with col_logo:
         try:
@@ -89,86 +90,157 @@ def main():
         st.markdown("<h1 style='color:#1E3A8A; margin-top:0px;'>R. Baumgartner AG</h1>", unsafe_allow_html=True)
     st.divider()
 
-    # =========================================================
-    # ANSICHT 1: STARTSEITE (HAUPTMENÜ)
-    # =========================================================
-    if st.session_state["view"] == "Start":
-        st.subheader("Bitte wählen Sie Ihren Bereich aus:")
-        st.write("") 
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("👷‍♂️ Mitarbeiter-Bereich", use_container_width=True):
-                st.session_state["view"] = "Mitarbeiter"
-                st.rerun()
-        with col2:
-            if st.button("🔐 Admin-Bereich", use_container_width=True):
-                st.session_state["view"] = "Admin_Login"
-                st.rerun()
+def render_start_view():
+    """Der Ursprung: Weggabelung zwischen Admin und Mitarbeiter."""
+    st.subheader("Bitte wählen Sie Ihren Bereich aus:")
+    st.write("") 
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("👷‍♂️ Mitarbeiter-Bereich", use_container_width=True):
+            st.session_state["view"] = "Mitarbeiter_Login"
+            st.rerun()
+    with col2:
+        if st.button("🔐 Admin-Bereich", use_container_width=True):
+            st.session_state["view"] = "Admin_Login"
+            st.rerun()
 
-    # =========================================================
-    # ANSICHT 2: ADMIN LOGIN
-    # =========================================================
-    elif st.session_state["view"] == "Admin_Login":
-        if st.button("⬅️ Zurück zur Startseite"):
+def process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_arbeit, f_mat, f_bem, sel_proj, PROJEKT_FID, ZEIT_FID):
+    """Dharma-Trikona: Die reine Logik der Arbeitszeitspeicherung."""
+    t1 = datetime.combine(f_date, f_start)
+    t2 = datetime.combine(f_date, f_end)
+    diff = (t2 - t1).total_seconds() / 3600
+    hours = round(diff - f_pause, 2)
+    
+    if hours < 0:
+        st.error("Dharma-Verletzung: Arbeitsende liegt vor Arbeitsbeginn!")
+        return
+    if sel_proj == "Bitte Projekte im Admin-Bereich anlegen":
+        st.error("Bitte wähle ein gültiges Projekt aus.")
+        return
+        
+    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    row_projekt = {
+        "Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"),
+        "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"],
+        "Arbeit": f_arbeit, "Material": f_mat, "Bemerkung": f_bem, "Status": "DRAFT"
+    }
+    
+    row_zeit = {
+        "Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"),
+        "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"],
+        "Start": f_start.strftime("%H:%M"), "Ende": f_end.strftime("%H:%M"),
+        "Pause": f_pause, "Stunden_Total": hours, "Reise_Min": f_reise, "Status": "DRAFT"
+    }
+    
+    # Prithvi: Speichern der Daten
+    df_p, fid_p = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
+    df_p = pd.concat([df_p, pd.DataFrame([row_projekt])], ignore_index=True)
+    ds.save_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv", df_p, fid_p)
+    
+    df_z, fid_z = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
+    df_z = pd.concat([df_z, pd.DataFrame([row_zeit])], ignore_index=True)
+    ds.save_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
+    
+    st.success("✅ Rapport im Einklang mit dem Dharma gespeichert.")
+
+
+# ==========================================
+# DAS HAUPT-MANDALA (Execution Flow)
+# ==========================================
+def main_flow():
+    init_cosmic_state()
+    render_header()
+
+    # --- 1. PRITHVI: Fundamentale Verbindung ---
+    try:
+        service = ds.get_drive_service()
+    except Exception:
+        st.error("Prithvi-Fehler: secrets.toml ist nicht korrekt konfiguriert.")
+        st.stop()
+
+    if not service:
+        st.warning("⚠️ Keine Verbindung zum Äther (Google Drive). Token fehlt.")
+        st.stop()
+
+    # Konfiguration laden
+    try:
+        PHOTOS_FID = st.secrets.get("general", {}).get("PHOTOS_FOLDER_ID", st.secrets.get("PHOTOS_FOLDER_ID"))
+        PROJEKT_FID = st.secrets.get("general", {}).get("PROJECT_REPORTS_FOLDER_ID", st.secrets.get("PROJECT_REPORTS_FOLDER_ID"))
+        ZEIT_FID = st.secrets.get("general", {}).get("TIME_REPORTS_FOLDER_ID", st.secrets.get("TIME_REPORTS_FOLDER_ID"))
+        ADMIN_PIN = st.secrets.get("ADMIN_PIN", st.secrets.get("general", {}).get("ADMIN_PIN", "1234"))
+    except KeyError:
+        st.error("Konfigurationsfehler: Ein Chakra (Ordner-ID) fehlt.")
+        st.stop()
+
+    # --- 2. ROUTING ---
+    view = st.session_state["view"]
+
+    if view == "Start":
+        render_start_view()
+
+    elif view == "Admin_Login":
+        if st.button("⬅️ Zurück"):
             st.session_state["view"] = "Start"
             st.rerun()
             
         st.subheader("🔐 Admin Login")
         pin_input = st.text_input("PIN eingeben", type="password")
         
-        if st.button("Anmelden", type="primary"):
+        if st.button("Eintreten", type="primary"):
             if str(pin_input).strip() == str(ADMIN_PIN).strip():
                 st.session_state["logged_in"] = True
                 st.session_state["user_role"] = "Admin"
-                st.session_state["user_name"] = "Administrator"
                 st.session_state["view"] = "Admin_Dashboard"
                 st.rerun()
             else:
-                st.error("Falsche PIN")
+                st.error("Agni verweigert den Zutritt (Falsche PIN)")
 
-    # =========================================================
-    # ANSICHT 3: MITARBEITER BEREICH
-    # =========================================================
-    elif st.session_state["view"] == "Mitarbeiter":
-        col_back, col_title = st.columns([1, 4])
-        with col_back:
-            if st.button("⬅️ Zurück"):
-                st.session_state["view"] = "Start"
-                st.rerun()
-        with col_title:
-            st.subheader("📋 Rapportierung")
+    elif view == "Mitarbeiter_Login":
+        if st.button("⬅️ Zurück"):
+            st.session_state["view"] = "Start"
+            st.rerun()
+            
+        st.subheader("👋 Identifikation")
+        df_emp, _ = ds.read_csv(service, PROJEKT_FID, "Employees.csv")
         
-        # --- Stammdaten laden (Mitarbeiter & Projekte) ---
-        df_emp, _ = ds.read_csv(service, PROJEKT_RAPPORTE_FID, "Employees.csv")
-        df_proj, _ = ds.read_csv(service, PROJEKT_RAPPORTE_FID, "Projects.csv")
-        
-        # Aktive Mitarbeiter filtern
         if not df_emp.empty and "Status" in df_emp.columns:
             active_emps = df_emp[df_emp["Status"] == "Aktiv"]["Name"].tolist()
         else:
-            active_emps = ["Max Mustermann", "Temporär 1"]
+            active_emps = ["Bitte Stammdaten im Admin-Bereich anlegen"]
             
-        # Aktive Projekte filtern
-        if not df_proj.empty and "Status" in df_proj.columns:
-            active_projs = df_proj[df_proj["Status"] == "Aktiv"]["Projekt"].tolist()
-        else:
-            active_projs = ["Allgemein", "Baustelle A"]
+        selected_employee = st.selectbox("Wähle deinen Namen:", active_emps)
+        
+        if st.button("Einloggen", type="primary"):
+            if selected_employee != "Bitte Stammdaten im Admin-Bereich anlegen":
+                st.session_state["user_name"] = selected_employee
+                st.session_state["view"] = "Mitarbeiter_Dashboard"
+                st.rerun()
+            else:
+                st.error("Stammdaten-Chakra blockiert.")
 
-        # Dropdowns für Identifikation
-        col_e, col_p = st.columns(2)
-        with col_e:
-            sel_emp = st.selectbox("Wer bist du?", active_emps)
-            st.session_state["user_name"] = sel_emp
-        with col_p:
-            sel_proj = st.selectbox("Projekt auswählen", active_projs)
+    elif view == "Mitarbeiter_Dashboard":
+        col_back, col_title = st.columns([1, 4])
+        with col_back:
+            if st.button("🚪 Logout"):
+                st.session_state["user_name"] = ""
+                st.session_state["view"] = "Start"
+                st.rerun()
+        with col_title:
+            st.subheader(f"📋 Rapport: {st.session_state['user_name']}")
         
-        tab1, tab2, tab3 = st.tabs(["📝 Rapport (Zeit & Arbeit)", "📤 Fotos Hochladen", "🖼️ Galerie Ansehen"])
+        df_proj, _ = ds.read_csv(service, PROJEKT_FID, "Projects.csv")
+        if not df_proj.empty and "Status" in df_proj.columns:
+            active_projs = df_proj[df_proj["Status"] == "Aktiv"]["Projekt_Name"].tolist()
+        else:
+            active_projs = ["Bitte Projekte im Admin-Bereich anlegen"]
+
+        selected_project = st.selectbox("Projekt:", active_projs)
         
-        # TAB 1: Kombinierter Rapport
+        tab1, tab2, tab3 = st.tabs(["📝 Rapport", "📤 Upload", "🖼️ Galerie"])
+        
         with tab1:
             with st.form("ma_form"):
-                st.markdown("**Tagesdaten**")
                 col_a, col_b = st.columns(2)
                 with col_a:
                     f_date = st.date_input("Datum", datetime.now())
@@ -176,171 +248,96 @@ def main():
                     f_end = st.time_input("Ende", datetime.strptime("16:30", "%H:%M").time())
                 with col_b:
                     f_pause = st.number_input("Pause (Std)", value=0.5, step=0.25)
-                    f_reise = st.number_input("Reisezeit (Min)", value=0, step=15)
+                    f_reise = st.number_input("Reise (Min)", value=0, step=15)
                 
-                st.divider()
-                st.markdown("**Details**")
-                f_arbeit = st.text_area("Arbeitsbeschrieb (Was wurde gemacht?)")
-                f_mat = st.text_area("Materialeinsatz")
-                f_bem = st.text_input("Interne Bemerkung")
+                f_arbeit = st.text_area("Arbeitsbeschrieb")
+                f_mat = st.text_area("Material")
+                f_bem = st.text_input("Bemerkung")
                 
-                if st.form_submit_button("💾 Rapport speichern", type="primary"):
-                    # Berechnungen
-                    t1 = datetime.combine(f_date, f_start)
-                    t2 = datetime.combine(f_date, f_end)
-                    diff = (t2 - t1).total_seconds() / 3600
-                    hours = round(diff - f_pause, 2)
-                    
-                    if hours < 0:
-                        st.error("Fehler: Arbeitsende liegt vor Arbeitsbeginn!")
-                    else:
-                        ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        
-                        # Datensatz Projekt
-                        row_projekt = {
-                            "Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"),
-                            "Projekt": sel_proj, "Mitarbeiter": sel_emp,
-                            "Arbeit": f_arbeit, "Material": f_mat, "Bemerkung": f_bem, "Status": "DRAFT"
-                        }
-                        
-                        # Datensatz Zeit
-                        row_zeit = {
-                            "Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"),
-                            "Projekt": sel_proj, "Mitarbeiter": sel_emp,
-                            "Start": f_start.strftime("%H:%M"), "Ende": f_end.strftime("%H:%M"),
-                            "Pause": f_pause, "Stunden_Total": hours, "Reise_Min": f_reise, "Status": "DRAFT"
-                        }
-                        
-                        # Speichern
-                        df_p, fid_p = ds.read_csv(service, PROJEKT_RAPPORTE_FID, "Baustellen_Rapport.csv")
-                        df_p = pd.concat([df_p, pd.DataFrame([row_projekt])], ignore_index=True)
-                        ds.save_csv(service, PROJEKT_RAPPORTE_FID, "Baustellen_Rapport.csv", df_p, fid_p)
-                        
-                        df_z, fid_z = ds.read_csv(service, ZEIT_RAPPORTE_FID, "Arbeitszeit_AKZ.csv")
-                        df_z = pd.concat([df_z, pd.DataFrame([row_zeit])], ignore_index=True)
-                        ds.save_csv(service, ZEIT_RAPPORTE_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
-                        
-                        st.success("✅ Rapport erfolgreich gespeichert.")
+                if st.form_submit_button("💾 Speichern", type="primary"):
+                    process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_arbeit, f_mat, f_bem, selected_project, PROJEKT_FID, ZEIT_FID)
 
-        # TAB 2: Fotos Hochladen
         with tab2:
-            st.info(f"Fotos laden in Ordner: **{sel_proj}**")
-            files = st.file_uploader("Bilder wählen", accept_multiple_files=True, type=['jpg','png','jpeg'])
-            
-            if st.button("📤 Fotos hochladen", type="primary"):
+            st.info(f"Bilder für: **{selected_project}**")
+            files = st.file_uploader("Wählen", accept_multiple_files=True, type=['jpg','png','jpeg'])
+            if st.button("📤 Hochladen", type="primary"):
                 if files:
                     prog = st.progress(0)
-                    for idx, f in enumerate(files):
+                    for idx, f in enumerate(files[:PAGINATION_LIMIT]): # 27er Regel Limit
                         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        fname = f"{sel_proj}_{ts}_{f.name}"
+                        fname = f"{selected_project}_{ts}_{f.name}"
                         ds.upload_image(service, PHOTOS_FID, fname, io.BytesIO(f.getvalue()), f.type)
                         prog.progress((idx + 1) / len(files))
-                    st.success("✅ Bilder übertragen.")
-                    # Cache leeren, damit neue Bilder in der Galerie auftauchen
+                    st.success("✅ Erledigt.")
                     st.cache_data.clear()
                     time.sleep(1)
                     st.rerun()
 
-        # TAB 3: Galerie Ansehen
         with tab3:
-            st.markdown(f"**Bilder für Projekt: {sel_proj}**")
-            if st.button("🔄 Galerie aktualisieren"):
+            if st.button("🔄 Refresh"):
                 st.cache_data.clear()
                 st.rerun()
                 
-            images = load_project_images(service, PHOTOS_FID, sel_proj)
+            images = load_project_images_flowing(service, PHOTOS_FID, selected_project)
             if not images:
-                st.info("Noch keine Fotos für dieses Projekt hochgeladen.")
+                st.info("Raum ist leer.")
             else:
                 cols = st.columns(3)
                 for idx, img in enumerate(images):
-                    col = cols[idx % 3]
-                    with col:
-                        img_bytes = get_image_bytes(service, img['id'])
+                    with cols[idx % 3]:
+                        img_bytes = get_image_bytes_flowing(service, img['id'])
                         if img_bytes:
                             st.image(img_bytes, caption=img['name'], use_container_width=True)
 
-
-    # =========================================================
-    # ANSICHT 4: ADMIN DASHBOARD
-    # =========================================================
-    elif st.session_state["view"] == "Admin_Dashboard":
+    elif view == "Admin_Dashboard":
         col1, col2 = st.columns([4, 1])
         with col1:
             st.subheader("🛠️ Admin Zentrale")
         with col2:
-            if st.button("🚪 Abmelden", use_container_width=True):
+            if st.button("🚪 Logout", use_container_width=True):
                 st.session_state["logged_in"] = False
-                st.session_state["user_role"] = ""
                 st.session_state["view"] = "Start"
                 st.rerun()
         
-        t_zeit, t_bau, t_stam = st.tabs(["🕒 AKZ / Zeiten", "🏗️ Baustellen-Rapporte", "⚙️ Stammdaten"])
+        t_zeit, t_bau, t_stam = st.tabs(["🕒 AKZ", "🏗️ Rapporte", "⚙️ Stammdaten"])
         
-        # TAB 1: ZEITEN
         with t_zeit:
-            st.markdown("**Arbeitszeit Kontrolle (AKZ)**")
-            if st.button("🔄 Zeiten laden"):
-                st.rerun()
-            
-            df_z, fid_z = ds.read_csv(service, ZEIT_RAPPORTE_FID, "Arbeitszeit_AKZ.csv")
-            if df_z.empty:
-                st.info("Keine Zeitdaten vorhanden.")
-            else:
-                edit_z = st.data_editor(df_z, num_rows="dynamic", key="editor_zeit", use_container_width=True)
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("💾 Zeit-Tabelle speichern", type="primary"):
-                        ds.save_csv(service, ZEIT_RAPPORTE_FID, "Arbeitszeit_AKZ.csv", edit_z, fid_z)
-                        st.success("Gespeichert.")
-                with c2:
-                    csv_z = edit_z.to_csv(index=False).encode('utf-8')
-                    st.download_button("Excel Export (Zeiten)", csv_z, "Export_AKZ.csv", "text/csv")
+            df_z, fid_z = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
+            if not df_z.empty:
+                edit_z = st.data_editor(df_z, num_rows="dynamic", use_container_width=True)
+                if st.button("💾 Speichern (AKZ)", type="primary"):
+                    ds.save_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv", edit_z, fid_z)
+                    st.success("Gespeichert.")
 
-        # TAB 2: BAUSTELLEN RAPPORTE
         with t_bau:
-            st.markdown("**Tagesrapporte (Inhalt)**")
-            df_p, fid_p = ds.read_csv(service, PROJEKT_RAPPORTE_FID, "Baustellen_Rapport.csv")
-            if df_p.empty:
-                st.info("Keine Rapporte.")
-            else:
-                edit_p = st.data_editor(df_p, num_rows="dynamic", key="editor_proj", use_container_width=True)
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("💾 Projekt-Rapporte speichern", type="primary"):
-                        ds.save_csv(service, PROJEKT_RAPPORTE_FID, "Baustellen_Rapport.csv", edit_p, fid_p)
-                        st.success("Gespeichert.")
-                with c2:
-                    csv_p = edit_p.to_csv(index=False).encode('utf-8')
-                    st.download_button("Excel Export (Rapporte)", csv_p, "Export_Projekt.csv", "text/csv")
+            df_p, fid_p = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
+            if not df_p.empty:
+                edit_p = st.data_editor(df_p, num_rows="dynamic", use_container_width=True)
+                if st.button("💾 Speichern (Rapporte)", type="primary"):
+                    ds.save_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv", edit_p, fid_p)
+                    st.success("Gespeichert.")
 
-        # TAB 3: STAMMDATEN (Erweitert)
         with t_stam:
-            col_proj, col_emp = st.columns(2)
+            st.markdown("**🏗️ Projekte**")
+            df_proj, fid_proj = ds.read_csv(service, PROJEKT_FID, "Projects.csv")
+            if df_proj.empty or "Auftragsnummer" not in df_proj.columns:
+                df_proj = pd.DataFrame({"Projekt_ID": ["P100"], "Auftragsnummer": ["A-01"], "Projekt_Name": ["Baustelle A"], "Status": ["Aktiv"]})
             
-            # --- PROJEKTE ---
-            with col_proj:
-                st.markdown("**🏗️ Projekte verwalten**")
-                df_proj, fid_proj = ds.read_csv(service, PROJEKT_RAPPORTE_FID, "Projects.csv")
-                if df_proj.empty:
-                    df_proj = pd.DataFrame({"Projekt": ["Baustelle A", "Baustelle B"], "Status": ["Aktiv", "Archiviert"]})
-                
-                edit_proj = st.data_editor(df_proj, num_rows="dynamic", key="editor_s_proj", use_container_width=True)
-                if st.button("💾 Projekte speichern"):
-                    ds.save_csv(service, PROJEKT_RAPPORTE_FID, "Projects.csv", edit_proj, fid_proj)
-                    st.success("Projekte aktualisiert.")
+            edit_proj = st.data_editor(df_proj, num_rows="dynamic", key="e_proj", use_container_width=True)
+            if st.button("💾 Projekte Sichern"):
+                ds.save_csv(service, PROJEKT_FID, "Projects.csv", edit_proj, fid_proj)
+                st.success("Aktualisiert.")
 
-            # --- MITARBEITER ---
-            with col_emp:
-                st.markdown("**👷‍♂️ Mitarbeiter verwalten**")
-                df_emp, fid_emp = ds.read_csv(service, PROJEKT_RAPPORTE_FID, "Employees.csv")
-                if df_emp.empty:
-                    df_emp = pd.DataFrame({"Name": ["Christoph Schlorff", "Temporär 1"], "Status": ["Aktiv", "Inaktiv"]})
-                
-                edit_emp = st.data_editor(df_emp, num_rows="dynamic", key="editor_s_emp", use_container_width=True)
-                if st.button("💾 Mitarbeiter speichern"):
-                    ds.save_csv(service, PROJEKT_RAPPORTE_FID, "Employees.csv", edit_emp, fid_emp)
-                    st.success("Mitarbeiter aktualisiert.")
+            st.markdown("**👷‍♂️ Mitarbeiter**")
+            df_emp, fid_emp = ds.read_csv(service, PROJEKT_FID, "Employees.csv")
+            if df_emp.empty or "Mitarbeiter_ID" not in df_emp.columns:
+                df_emp = pd.DataFrame({"Mitarbeiter_ID": ["M01"], "Name": ["Christoph Schlorff"], "Status": ["Aktiv"]})
+            
+            edit_emp = st.data_editor(df_emp, num_rows="dynamic", key="e_emp", use_container_width=True)
+            if st.button("💾 Mitarbeiter Sichern"):
+                ds.save_csv(service, PROJEKT_FID, "Employees.csv", edit_emp, fid_emp)
+                st.success("Aktualisiert.")
 
 if __name__ == "__main__":
-    main()
+    # Der Zündfunke des Lebenszyklus
+    main_flow()
