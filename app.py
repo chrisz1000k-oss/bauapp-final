@@ -3,6 +3,8 @@ import pandas as pd
 from datetime import datetime
 import time
 import io
+import qrcode
+from PIL import Image
 from googleapiclient.http import MediaIoBaseDownload
 
 import drive_store as ds
@@ -10,15 +12,9 @@ import drive_store as ds
 # ==========================================
 # AKASHA (Raum) & NUMEROLOGISCHE FREQUENZEN
 # ==========================================
-# 108er-Konstante: Universelle Vollendung für Caching und Puffer
 CACHE_TTL_SECONDS = 108        
 MAX_IMAGE_BUFFER = 108         
-
-# 27er-Regel: Resonanz für Listen-Darstellungen und Chunking
 PAGINATION_LIMIT = 27          
-
-# 114er-Integrität: Die App ist konzeptionell in 114 UI-Knoten aufteilbar.
-# Hier definieren wir den Basis-Port als symbolischen Anker.
 COSMIC_PORT = 11400            
 
 # ==========================================
@@ -34,24 +30,22 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-
 # ==========================================
 # JALA (Wasser): Fließende, entkoppelte Helfer
 # ==========================================
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def load_project_images_flowing(_service, folder_id: str, project_name: str) -> list:
-    """Jala & Agni: Lädt Bilder schnell und fließend aus dem Cache."""
+def load_project_files_flowing(_service, folder_id: str, project_name: str) -> list:
+    """Lädt Bilder oder Pläne schnell und fließend aus dem Cache."""
     query = f"'{folder_id}' in parents and name contains '{project_name}' and trashed = false"
     try:
         results = _service.files().list(q=query, fields="files(id, name)").execute()
-        return results.get('files', [])[:MAX_IMAGE_BUFFER] # 108er Limit
+        return results.get('files', [])[:MAX_IMAGE_BUFFER]
     except Exception as error:
-        st.error(f"Prithvi-Fehler im Datenstrom: {error}")
         return []
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS * 10, show_spinner=False)
-def get_image_bytes_flowing(_service, file_id: str):
-    """Moksha: Sichert den Download-Stream vor Abbrüchen."""
+def get_file_bytes_flowing(_service, file_id: str):
+    """Sichert den Download-Stream vor Abbrüchen."""
     try:
         request = _service.files().get_media(fileId=file_id)
         file_handler = io.BytesIO()
@@ -63,12 +57,22 @@ def get_image_bytes_flowing(_service, file_id: str):
     except Exception:
         return None
 
+def generate_qr_code(data_string: str):
+    """Erschafft das QR-Mandala aus einem Text/Link."""
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr.add_data(data_string)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    # In Bytes umwandeln für Streamlit
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='PNG')
+    return img_byte_arr.getvalue()
 
 # ==========================================
-# VAYU (Luft): Leichtgewichtige UI-Komponenten (Modularität)
+# VAYU (Luft): Leichtgewichtige UI-Komponenten
 # ==========================================
 def init_cosmic_state():
-    """Setzt den Grundzustand des Mandalas (Session State)."""
     if "logged_in" not in st.session_state:
         st.session_state["logged_in"] = False
     if "user_role" not in st.session_state:
@@ -79,7 +83,6 @@ def init_cosmic_state():
         st.session_state["view"] = "Start"
 
 def render_header():
-    """Kama-Trikona: Harmonische Kopfzeile."""
     col_logo, col_name = st.columns([1, 6])
     with col_logo:
         try:
@@ -91,7 +94,6 @@ def render_header():
     st.divider()
 
 def render_start_view():
-    """Der Ursprung: Weggabelung zwischen Admin und Mitarbeiter."""
     st.subheader("Bitte wählen Sie Ihren Bereich aus:")
     st.write("") 
     col1, col2 = st.columns(2)
@@ -105,14 +107,13 @@ def render_start_view():
             st.rerun()
 
 def process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_arbeit, f_mat, f_bem, sel_proj, PROJEKT_FID, ZEIT_FID):
-    """Dharma-Trikona: Die reine Logik der Arbeitszeitspeicherung."""
     t1 = datetime.combine(f_date, f_start)
     t2 = datetime.combine(f_date, f_end)
     diff = (t2 - t1).total_seconds() / 3600
     hours = round(diff - f_pause, 2)
     
     if hours < 0:
-        st.error("Dharma-Verletzung: Arbeitsende liegt vor Arbeitsbeginn!")
+        st.error("Fehler: Arbeitsende liegt vor Arbeitsbeginn!")
         return
     if sel_proj == "Bitte Projekte im Admin-Bereich anlegen":
         st.error("Bitte wähle ein gültiges Projekt aus.")
@@ -133,7 +134,6 @@ def process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_
         "Pause": f_pause, "Stunden_Total": hours, "Reise_Min": f_reise, "Status": "DRAFT"
     }
     
-    # Prithvi: Speichern der Daten
     df_p, fid_p = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
     df_p = pd.concat([df_p, pd.DataFrame([row_projekt])], ignore_index=True)
     ds.save_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv", df_p, fid_p)
@@ -142,8 +142,7 @@ def process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_
     df_z = pd.concat([df_z, pd.DataFrame([row_zeit])], ignore_index=True)
     ds.save_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
     
-    st.success("✅ Rapport im Einklang mit dem Dharma gespeichert.")
-
+    st.success("✅ Rapport erfolgreich gespeichert.")
 
 # ==========================================
 # DAS HAUPT-MANDALA (Execution Flow)
@@ -152,28 +151,29 @@ def main_flow():
     init_cosmic_state()
     render_header()
 
-    # --- 1. PRITHVI: Fundamentale Verbindung ---
     try:
         service = ds.get_drive_service()
     except Exception:
-        st.error("Prithvi-Fehler: secrets.toml ist nicht korrekt konfiguriert.")
+        st.error("Kritischer Fehler: secrets.toml ist nicht korrekt konfiguriert.")
         st.stop()
 
     if not service:
-        st.warning("⚠️ Keine Verbindung zum Äther (Google Drive). Token fehlt.")
+        st.warning("⚠️ Keine Verbindung zu Google Drive. Token fehlt.")
         st.stop()
 
-    # Konfiguration laden
     try:
+        # Die 4 Säulen (Ordner) laden
         PHOTOS_FID = st.secrets.get("general", {}).get("PHOTOS_FOLDER_ID", st.secrets.get("PHOTOS_FOLDER_ID"))
         PROJEKT_FID = st.secrets.get("general", {}).get("PROJECT_REPORTS_FOLDER_ID", st.secrets.get("PROJECT_REPORTS_FOLDER_ID"))
         ZEIT_FID = st.secrets.get("general", {}).get("TIME_REPORTS_FOLDER_ID", st.secrets.get("TIME_REPORTS_FOLDER_ID"))
+        PLAENE_FID = st.secrets.get("general", {}).get("PLANS_FOLDER_ID", st.secrets.get("PLANS_FOLDER_ID", ""))
+        
         ADMIN_PIN = st.secrets.get("ADMIN_PIN", st.secrets.get("general", {}).get("ADMIN_PIN", "1234"))
+        BASE_URL = st.secrets.get("general", {}).get("BASE_APP_URL", st.secrets.get("BASE_APP_URL", "https://8bv6gzagymvrdgnm8wrtrq.streamlit.app"))
     except KeyError:
-        st.error("Konfigurationsfehler: Ein Chakra (Ordner-ID) fehlt.")
+        st.error("Konfigurationsfehler in den Secrets.")
         st.stop()
 
-    # --- 2. ROUTING ---
     view = st.session_state["view"]
 
     if view == "Start":
@@ -194,7 +194,7 @@ def main_flow():
                 st.session_state["view"] = "Admin_Dashboard"
                 st.rerun()
             else:
-                st.error("Agni verweigert den Zutritt (Falsche PIN)")
+                st.error("Falsche PIN")
 
     elif view == "Mitarbeiter_Login":
         if st.button("⬅️ Zurück"):
@@ -217,7 +217,7 @@ def main_flow():
                 st.session_state["view"] = "Mitarbeiter_Dashboard"
                 st.rerun()
             else:
-                st.error("Stammdaten-Chakra blockiert.")
+                st.error("Blockiert: Keine aktiven Mitarbeiter.")
 
     elif view == "Mitarbeiter_Dashboard":
         col_back, col_title = st.columns([1, 4])
@@ -263,7 +263,7 @@ def main_flow():
             if st.button("📤 Hochladen", type="primary"):
                 if files:
                     prog = st.progress(0)
-                    for idx, f in enumerate(files[:PAGINATION_LIMIT]): # 27er Regel Limit
+                    for idx, f in enumerate(files[:PAGINATION_LIMIT]):
                         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                         fname = f"{selected_project}_{ts}_{f.name}"
                         ds.upload_image(service, PHOTOS_FID, fname, io.BytesIO(f.getvalue()), f.type)
@@ -278,14 +278,14 @@ def main_flow():
                 st.cache_data.clear()
                 st.rerun()
                 
-            images = load_project_images_flowing(service, PHOTOS_FID, selected_project)
+            images = load_project_files_flowing(service, PHOTOS_FID, selected_project)
             if not images:
-                st.info("Raum ist leer.")
+                st.info("Noch keine Fotos vorhanden.")
             else:
                 cols = st.columns(3)
                 for idx, img in enumerate(images):
                     with cols[idx % 3]:
-                        img_bytes = get_image_bytes_flowing(service, img['id'])
+                        img_bytes = get_file_bytes_flowing(service, img['id'])
                         if img_bytes:
                             st.image(img_bytes, caption=img['name'], use_container_width=True)
 
@@ -299,7 +299,8 @@ def main_flow():
                 st.session_state["view"] = "Start"
                 st.rerun()
         
-        t_zeit, t_bau, t_stam = st.tabs(["🕒 AKZ", "🏗️ Rapporte", "⚙️ Stammdaten"])
+        # --- NEUER TAB: Pläne & QR hinzugefügt ---
+        t_zeit, t_bau, t_stam, t_docs = st.tabs(["🕒 AKZ", "🏗️ Rapporte", "⚙️ Stammdaten", "📂 Pläne & QR"])
         
         with t_zeit:
             df_z, fid_z = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
@@ -338,6 +339,63 @@ def main_flow():
                 ds.save_csv(service, PROJEKT_FID, "Employees.csv", edit_emp, fid_emp)
                 st.success("Aktualisiert.")
 
+        # --- ADMIN DOKUMENTE & QR LOGIK ---
+        with t_docs:
+            st.markdown("**Dateien für Baustelle vorbereiten**")
+            
+            # Projekt auswählen
+            df_proj, _ = ds.read_csv(service, PROJEKT_FID, "Projects.csv")
+            if not df_proj.empty and "Status" in df_proj.columns:
+                active_projs = df_proj[df_proj["Status"] == "Aktiv"]["Projekt_Name"].tolist()
+            else:
+                active_projs = ["Keine Projekte gefunden"]
+                
+            admin_sel_proj = st.selectbox("Projekt auswählen:", active_projs, key="admin_proj_sel")
+            
+            st.divider()
+            
+            col_up, col_qr = st.columns(2)
+            
+            with col_up:
+                st.markdown("**📤 Pläne / Dokumente hochladen**")
+                plan_files = st.file_uploader("PDF Pläne wählen", accept_multiple_files=True, type=['pdf', 'jpg', 'png'])
+                if st.button("Pläne ins Drive laden"):
+                    if plan_files and PLAENE_FID:
+                        for f in plan_files:
+                            fname = f"{admin_sel_proj}_PLAN_{f.name}"
+                            ds.upload_image(service, PLAENE_FID, fname, io.BytesIO(f.getvalue()), f.type)
+                        st.success("Pläne hochgeladen.")
+                    elif not PLAENE_FID:
+                        st.error("Ordner-ID für Pläne fehlt in secrets.toml!")
+                        
+                st.markdown("**📷 Start-Fotos hochladen**")
+                foto_files = st.file_uploader("Fotos für Mitarbeiter wählen", accept_multiple_files=True, type=['jpg', 'png'])
+                if st.button("Fotos ins Drive laden"):
+                    if foto_files:
+                        for f in foto_files:
+                            fname = f"{admin_sel_proj}_ADMIN_{f.name}"
+                            ds.upload_image(service, PHOTOS_FID, fname, io.BytesIO(f.getvalue()), f.type)
+                        st.success("Fotos hochgeladen.")
+
+            with col_qr:
+                st.markdown("**🔲 QR-Code Druckvorlage**")
+                st.write("Erstellt einen Code, den Mitarbeiter direkt scannen können.")
+                
+                if st.button("QR-Code für dieses Projekt generieren"):
+                    if admin_sel_proj != "Keine Projekte gefunden":
+                        # Der Link enthält als Parameter das Projekt, sodass wir das später auslesen können
+                        safe_proj_name = admin_sel_proj.replace(" ", "%20")
+                        qr_url = f"{BASE_URL}?projekt={safe_proj_name}"
+                        
+                        qr_image_bytes = generate_qr_code(qr_url)
+                        
+                        st.image(qr_image_bytes, width=250)
+                        st.download_button(
+                            label="📥 QR-Code als PNG speichern",
+                            data=qr_image_bytes,
+                            file_name=f"QR_{admin_sel_proj}.png",
+                            mime="image/png"
+                        )
+
 if __name__ == "__main__":
-    # Der Zündfunke des Lebenszyklus
     main_flow()
