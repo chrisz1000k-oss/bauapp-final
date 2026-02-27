@@ -26,10 +26,11 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==========================================
-# FLIESSENDE HELFER (Ohne fehleranfällige Bibliotheken)
+# FLIESSENDE HELFER
 # ==========================================
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def load_project_files_flowing(_service, folder_id: str, project_name: str) -> list:
+    if not folder_id: return []
     query = f"'{folder_id}' in parents and name contains '{project_name}' and trashed = false"
     try:
         results = _service.files().list(q=query, fields="files(id, name)").execute()
@@ -51,14 +52,10 @@ def get_file_bytes_flowing(_service, file_id: str):
         return None
 
 def init_cosmic_state():
-    if "logged_in" not in st.session_state:
-        st.session_state["logged_in"] = False
-    if "user_role" not in st.session_state:
-        st.session_state["user_role"] = ""
-    if "user_name" not in st.session_state:
-        st.session_state["user_name"] = ""
-    if "view" not in st.session_state:
-        st.session_state["view"] = "Start"
+    if "logged_in" not in st.session_state: st.session_state["logged_in"] = False
+    if "user_role" not in st.session_state: st.session_state["user_role"] = ""
+    if "user_name" not in st.session_state: st.session_state["user_name"] = ""
+    if "view" not in st.session_state: st.session_state["view"] = "Start"
 
 def render_header():
     col_logo, col_name = st.columns([1, 6])
@@ -70,19 +67,6 @@ def render_header():
     with col_name:
         st.markdown("<h1 style='color:#1E3A8A; margin-top:0px;'>R. Baumgartner AG</h1>", unsafe_allow_html=True)
     st.divider()
-
-def render_start_view():
-    st.subheader("Bitte wählen Sie Ihren Bereich aus:")
-    st.write("") 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("👷‍♂️ Mitarbeiter-Bereich", use_container_width=True):
-            st.session_state["view"] = "Mitarbeiter_Login"
-            st.rerun()
-    with col2:
-        if st.button("🔐 Admin-Bereich", use_container_width=True):
-            st.session_state["view"] = "Admin_Login"
-            st.rerun()
 
 def process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_arbeit, f_mat, f_bem, sel_proj, PROJEKT_FID, ZEIT_FID):
     t1 = datetime.combine(f_date, f_start)
@@ -99,18 +83,8 @@ def process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_
         
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    row_projekt = {
-        "Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"),
-        "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"],
-        "Arbeit": f_arbeit, "Material": f_mat, "Bemerkung": f_bem, "Status": "DRAFT"
-    }
-    
-    row_zeit = {
-        "Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"),
-        "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"],
-        "Start": f_start.strftime("%H:%M"), "Ende": f_end.strftime("%H:%M"),
-        "Pause": f_pause, "Stunden_Total": hours, "Reise_Min": f_reise, "Status": "DRAFT"
-    }
+    row_projekt = {"Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"), "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Arbeit": f_arbeit, "Material": f_mat, "Bemerkung": f_bem, "Status": "DRAFT"}
+    row_zeit = {"Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"), "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Start": f_start.strftime("%H:%M"), "Ende": f_end.strftime("%H:%M"), "Pause": f_pause, "Stunden_Total": hours, "Reise_Min": f_reise, "Status": "DRAFT"}
     
     df_p, fid_p = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
     df_p = pd.concat([df_p, pd.DataFrame([row_projekt])], ignore_index=True)
@@ -123,7 +97,7 @@ def process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_
     st.success("✅ Rapport erfolgreich gespeichert.")
 
 # ==========================================
-# DAS HAUPT-MANDALA (Execution Flow)
+# HAUPT-LOGIK
 # ==========================================
 def main_flow():
     init_cosmic_state()
@@ -140,21 +114,31 @@ def main_flow():
         st.stop()
 
     try:
-        PHOTOS_FID = st.secrets.get("general", {}).get("PHOTOS_FOLDER_ID", st.secrets.get("PHOTOS_FOLDER_ID"))
-        PROJEKT_FID = st.secrets.get("general", {}).get("PROJECT_REPORTS_FOLDER_ID", st.secrets.get("PROJECT_REPORTS_FOLDER_ID"))
-        ZEIT_FID = st.secrets.get("general", {}).get("TIME_REPORTS_FOLDER_ID", st.secrets.get("TIME_REPORTS_FOLDER_ID"))
-        PLAENE_FID = st.secrets.get("general", {}).get("PLANS_FOLDER_ID", st.secrets.get("PLANS_FOLDER_ID", ""))
-        
-        ADMIN_PIN = st.secrets.get("ADMIN_PIN", st.secrets.get("general", {}).get("ADMIN_PIN", "1234"))
-        BASE_URL = st.secrets.get("general", {}).get("BASE_APP_URL", st.secrets.get("BASE_APP_URL", "https://8bv6gzagymvrdgnm8wrtrq.streamlit.app"))
-    except KeyError:
+        s = st.secrets.get("general", st.secrets)
+        PHOTOS_FID = s.get("PHOTOS_FOLDER_ID", "")
+        PROJEKT_FID = s.get("PROJECT_REPORTS_FOLDER_ID", "")
+        ZEIT_FID = s.get("TIME_REPORTS_FOLDER_ID", "")
+        PLAENE_FID = s.get("PLANS_FOLDER_ID", "")
+        ADMIN_PIN = s.get("ADMIN_PIN", "1234")
+        BASE_URL = s.get("BASE_APP_URL", "https://8bv6gzagymvrdgnm8wrtrq.streamlit.app")
+    except Exception:
         st.error("Konfigurationsfehler in den Secrets.")
         st.stop()
 
     view = st.session_state["view"]
 
     if view == "Start":
-        render_start_view()
+        st.subheader("Bitte wählen Sie Ihren Bereich aus:")
+        st.write("") 
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("👷‍♂️ Mitarbeiter-Bereich", use_container_width=True):
+                st.session_state["view"] = "Mitarbeiter_Login"
+                st.rerun()
+        with col2:
+            if st.button("🔐 Admin-Bereich", use_container_width=True):
+                st.session_state["view"] = "Admin_Login"
+                st.rerun()
 
     elif view == "Admin_Login":
         if st.button("⬅️ Zurück"):
@@ -257,14 +241,18 @@ def main_flow():
                 
             images = load_project_files_flowing(service, PHOTOS_FID, selected_project)
             if not images:
-                st.info("Noch keine Fotos vorhanden.")
+                st.info("Noch keine Fotos/Pläne vorhanden.")
             else:
                 cols = st.columns(3)
                 for idx, img in enumerate(images):
                     with cols[idx % 3]:
                         img_bytes = get_file_bytes_flowing(service, img['id'])
                         if img_bytes:
-                            st.image(img_bytes, caption=img['name'], use_container_width=True)
+                            # Zeige Bilder an. PDFs können in Streamlit nicht direkt mit st.image gezeigt werden.
+                            if img['name'].lower().endswith(('.png', '.jpg', '.jpeg')):
+                                st.image(img_bytes, caption=img['name'], use_container_width=True)
+                            else:
+                                st.download_button(label=f"📥 {img['name']}", data=img_bytes, file_name=img['name'])
 
     elif view == "Admin_Dashboard":
         col1, col2 = st.columns([4, 1])
@@ -353,17 +341,11 @@ def main_flow():
 
             with col_qr:
                 st.markdown("**🔲 QR-Code Druckvorlage**")
-                st.write("Erstellt einen Code, den Mitarbeiter direkt scannen können.")
-                
                 if st.button("QR-Code anzeigen"):
                     if admin_sel_proj != "Keine Projekte gefunden":
-                        # Sicherer Linkaufbau für die API
                         safe_proj_name = urllib.parse.quote(admin_sel_proj)
                         qr_url = f"{BASE_URL}?projekt={safe_proj_name}"
-                        
-                        # API-Lösung: 100% stabil, keine externe Bibliothek nötig
                         qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={urllib.parse.quote(qr_url)}"
-                        
                         st.image(qr_api_url, width=250)
                         st.info("💡 Rechtsklick auf das Bild -> 'Bild speichern unter...', um den Code zu drucken.")
 
