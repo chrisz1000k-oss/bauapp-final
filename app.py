@@ -3,23 +3,18 @@ import pandas as pd
 from datetime import datetime
 import time
 import io
-import qrcode
-from PIL import Image
+import urllib.parse
 from googleapiclient.http import MediaIoBaseDownload
 
 import drive_store as ds
 
 # ==========================================
-# AKASHA (Raum) & NUMEROLOGISCHE FREQUENZEN
+# KONFIGURATION & NUMEROLOGIE
 # ==========================================
 CACHE_TTL_SECONDS = 108        
 MAX_IMAGE_BUFFER = 108         
 PAGINATION_LIMIT = 27          
-COSMIC_PORT = 11400            
 
-# ==========================================
-# PRITHVI (Erde): Konfiguration & Stabilität
-# ==========================================
 st.set_page_config(page_title="R. Baumgartner AG - BauApp", layout="wide")
 
 st.markdown("""
@@ -31,21 +26,19 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==========================================
-# JALA (Wasser): Fließende, entkoppelte Helfer
+# FLIESSENDE HELFER (Ohne fehleranfällige Bibliotheken)
 # ==========================================
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def load_project_files_flowing(_service, folder_id: str, project_name: str) -> list:
-    """Lädt Bilder oder Pläne schnell und fließend aus dem Cache."""
     query = f"'{folder_id}' in parents and name contains '{project_name}' and trashed = false"
     try:
         results = _service.files().list(q=query, fields="files(id, name)").execute()
         return results.get('files', [])[:MAX_IMAGE_BUFFER]
-    except Exception as error:
+    except Exception:
         return []
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS * 10, show_spinner=False)
 def get_file_bytes_flowing(_service, file_id: str):
-    """Sichert den Download-Stream vor Abbrüchen."""
     try:
         request = _service.files().get_media(fileId=file_id)
         file_handler = io.BytesIO()
@@ -57,21 +50,6 @@ def get_file_bytes_flowing(_service, file_id: str):
     except Exception:
         return None
 
-def generate_qr_code(data_string: str):
-    """Erschafft das QR-Mandala aus einem Text/Link."""
-    qr = qrcode.QRCode(version=1, box_size=10, border=4)
-    qr.add_data(data_string)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    
-    # In Bytes umwandeln für Streamlit
-    img_byte_arr = io.BytesIO()
-    img.save(img_byte_arr, format='PNG')
-    return img_byte_arr.getvalue()
-
-# ==========================================
-# VAYU (Luft): Leichtgewichtige UI-Komponenten
-# ==========================================
 def init_cosmic_state():
     if "logged_in" not in st.session_state:
         st.session_state["logged_in"] = False
@@ -162,7 +140,6 @@ def main_flow():
         st.stop()
 
     try:
-        # Die 4 Säulen (Ordner) laden
         PHOTOS_FID = st.secrets.get("general", {}).get("PHOTOS_FOLDER_ID", st.secrets.get("PHOTOS_FOLDER_ID"))
         PROJEKT_FID = st.secrets.get("general", {}).get("PROJECT_REPORTS_FOLDER_ID", st.secrets.get("PROJECT_REPORTS_FOLDER_ID"))
         ZEIT_FID = st.secrets.get("general", {}).get("TIME_REPORTS_FOLDER_ID", st.secrets.get("TIME_REPORTS_FOLDER_ID"))
@@ -299,7 +276,6 @@ def main_flow():
                 st.session_state["view"] = "Start"
                 st.rerun()
         
-        # --- NEUER TAB: Pläne & QR hinzugefügt ---
         t_zeit, t_bau, t_stam, t_docs = st.tabs(["🕒 AKZ", "🏗️ Rapporte", "⚙️ Stammdaten", "📂 Pläne & QR"])
         
         with t_zeit:
@@ -339,11 +315,9 @@ def main_flow():
                 ds.save_csv(service, PROJEKT_FID, "Employees.csv", edit_emp, fid_emp)
                 st.success("Aktualisiert.")
 
-        # --- ADMIN DOKUMENTE & QR LOGIK ---
         with t_docs:
             st.markdown("**Dateien für Baustelle vorbereiten**")
             
-            # Projekt auswählen
             df_proj, _ = ds.read_csv(service, PROJEKT_FID, "Projects.csv")
             if not df_proj.empty and "Status" in df_proj.columns:
                 active_projs = df_proj[df_proj["Status"] == "Aktiv"]["Projekt_Name"].tolist()
@@ -381,21 +355,17 @@ def main_flow():
                 st.markdown("**🔲 QR-Code Druckvorlage**")
                 st.write("Erstellt einen Code, den Mitarbeiter direkt scannen können.")
                 
-                if st.button("QR-Code für dieses Projekt generieren"):
+                if st.button("QR-Code anzeigen"):
                     if admin_sel_proj != "Keine Projekte gefunden":
-                        # Der Link enthält als Parameter das Projekt, sodass wir das später auslesen können
-                        safe_proj_name = admin_sel_proj.replace(" ", "%20")
+                        # Sicherer Linkaufbau für die API
+                        safe_proj_name = urllib.parse.quote(admin_sel_proj)
                         qr_url = f"{BASE_URL}?projekt={safe_proj_name}"
                         
-                        qr_image_bytes = generate_qr_code(qr_url)
+                        # API-Lösung: 100% stabil, keine externe Bibliothek nötig
+                        qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={urllib.parse.quote(qr_url)}"
                         
-                        st.image(qr_image_bytes, width=250)
-                        st.download_button(
-                            label="📥 QR-Code als PNG speichern",
-                            data=qr_image_bytes,
-                            file_name=f"QR_{admin_sel_proj}.png",
-                            mime="image/png"
-                        )
+                        st.image(qr_api_url, width=250)
+                        st.info("💡 Rechtsklick auf das Bild -> 'Bild speichern unter...', um den Code zu drucken.")
 
 if __name__ == "__main__":
     main_flow()
