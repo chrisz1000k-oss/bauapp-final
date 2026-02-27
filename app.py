@@ -68,24 +68,40 @@ def render_header():
         st.markdown("<h1 style='color:#1E3A8A; margin-top:0px;'>R. Baumgartner AG</h1>", unsafe_allow_html=True)
     st.divider()
 
-def process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_arbeit, f_mat, f_bem, sel_proj, PROJEKT_FID, ZEIT_FID):
-    t1 = datetime.combine(f_date, f_start)
-    t2 = datetime.combine(f_date, f_end)
-    diff = (t2 - t1).total_seconds() / 3600
-    hours = round(diff - f_pause, 2)
-    
-    if hours < 0:
-        st.error("Fehler: Arbeitsende liegt vor Arbeitsbeginn!")
-        return
+def process_rapport_saving(service, f_date, f_hours, f_arbeit, f_mat, f_bem, sel_proj, PROJEKT_FID, ZEIT_FID):
     if sel_proj == "Bitte Projekte im Admin-Bereich anlegen":
         st.error("Bitte wähle ein gültiges Projekt aus.")
         return
         
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    row_projekt = {"Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"), "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Arbeit": f_arbeit, "Material": f_mat, "Bemerkung": f_bem, "Status": "DRAFT"}
-    row_zeit = {"Erfasst": ts_str, "Datum": f_date.strftime("%Y-%m-%d"), "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Start": f_start.strftime("%H:%M"), "Ende": f_end.strftime("%H:%M"), "Pause": f_pause, "Stunden_Total": hours, "Reise_Min": f_reise, "Status": "DRAFT"}
+    # Projekt-Rapport (Fokus auf ausgeführte Arbeiten und Material)
+    row_projekt = {
+        "Erfasst": ts_str, 
+        "Datum": f_date.strftime("%Y-%m-%d"), 
+        "Projekt": sel_proj, 
+        "Mitarbeiter": st.session_state["user_name"], 
+        "Arbeit": f_arbeit, 
+        "Material": f_mat, 
+        "Bemerkung": f_bem, 
+        "Status": "DRAFT"
+    }
     
+    # Zeit-Rapport (Start/Ende/Pause durch Platzhalter ersetzt, um Struktur zu wahren. Fokus auf Gesamtstunden)
+    row_zeit = {
+        "Erfasst": ts_str, 
+        "Datum": f_date.strftime("%Y-%m-%d"), 
+        "Projekt": sel_proj, 
+        "Mitarbeiter": st.session_state["user_name"], 
+        "Start": "-", 
+        "Ende": "-", 
+        "Pause": 0, 
+        "Stunden_Total": f_hours, 
+        "Reise_Min": 0, 
+        "Status": "DRAFT"
+    }
+    
+    # Prithvi: Stabile Speicherung
     df_p, fid_p = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
     df_p = pd.concat([df_p, pd.DataFrame([row_projekt])], ignore_index=True)
     ds.save_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv", df_p, fid_p)
@@ -94,7 +110,7 @@ def process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_
     df_z = pd.concat([df_z, pd.DataFrame([row_zeit])], ignore_index=True)
     ds.save_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
     
-    st.success("✅ Rapport erfolgreich im System verankert.")
+    st.success("✅ Rapport erfolgreich in der Essenz gespeichert.")
 
 # ==========================================
 # HAUPT-LOGIK
@@ -202,18 +218,17 @@ def main_flow():
                 col_a, col_b = st.columns(2)
                 with col_a:
                     f_date = st.date_input("Datum", datetime.now())
-                    f_start = st.time_input("Start", datetime.strptime("07:00", "%H:%M").time())
-                    f_end = st.time_input("Ende", datetime.strptime("16:30", "%H:%M").time())
                 with col_b:
-                    f_pause = st.number_input("Pause (Std)", value=0.5, step=0.25)
-                    f_reise = st.number_input("Reise (Min)", value=0, step=15)
+                    # Reduktion auf die Essenz: Gesamtstunden
+                    f_hours = st.number_input("Gesamtstunden", min_value=0.0, value=8.5, step=0.25)
                 
-                f_arbeit = st.text_area("Ausgeführte Arbeiten (Detailliert)")
+                # Orthografische Integrität
+                f_arbeit = st.text_area("Ausgeführte Arbeiten")
                 f_mat = st.text_area("Materialeinsatz")
                 f_bem = st.text_input("Bemerkung / Behinderungen")
                 
                 if st.form_submit_button("💾 Speichern", type="primary"):
-                    process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_arbeit, f_mat, f_bem, selected_project, PROJEKT_FID, ZEIT_FID)
+                    process_rapport_saving(service, f_date, f_hours, f_arbeit, f_mat, f_bem, selected_project, PROJEKT_FID, ZEIT_FID)
 
         with tab2:
             st.info(f"Medien für: **{selected_project}**")
@@ -252,23 +267,21 @@ def main_flow():
                                 st.download_button(label=f"📥 {img['name']}", data=img_bytes, file_name=img['name'])
                                 
         with tab4:
-            st.markdown(f"**Vollständige Schöpfungskette: {selected_project}**")
-            # Daten-Fusion (Jala-Tattva): Zusammenführen von Inhalt und Zeit
+            st.markdown(f"**Projekt-Historie: {selected_project}**")
             df_hist_p, _ = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
             df_hist_z, _ = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
             
             if not df_hist_p.empty and not df_hist_z.empty and "Erfasst" in df_hist_p.columns and "Erfasst" in df_hist_z.columns:
-                # Merge basierend auf dem exakten Zeitstempel
-                df_merged = pd.merge(df_hist_p, df_hist_z[["Erfasst", "Start", "Ende", "Stunden_Total"]], on="Erfasst", how="left")
+                df_merged = pd.merge(df_hist_p, df_hist_z[["Erfasst", "Stunden_Total"]], on="Erfasst", how="left")
                 df_proj_hist = df_merged[df_merged["Projekt"] == selected_project].sort_values(by="Datum", ascending=False)
                 
                 if df_proj_hist.empty:
                     st.info("Noch keine Rapporte für dieses Projekt.")
                 else:
                     for _, row in df_proj_hist.head(PAGINATION_LIMIT).iterrows():
+                        # Transparenz: Alles Wesentliche auf einen Blick
                         with st.expander(f"🗓️ {row['Datum']} | 👷‍♂️ {row['Mitarbeiter']} | ⏱️ {row.get('Stunden_Total', '-')} Std."):
-                            st.markdown(f"**Zeitfenster:** {row.get('Start', '-')} bis {row.get('Ende', '-')} Uhr")
-                            st.markdown(f"**Arbeiten:**\n{row.get('Arbeit', '-')}")
+                            st.markdown(f"**Ausgeführte Arbeiten:**\n{row.get('Arbeit', '-')}")
                             st.markdown(f"**Materialeinsatz:**\n{row.get('Material', '-')}")
             else:
                 st.info("Datenbasis noch unvollständig.")
@@ -353,8 +366,8 @@ def main_flow():
                             else: st.download_button(label=f"📥 {img['name'][:15]}...", data=img_bytes, file_name=img['name'])
 
         with t_print:
-            st.markdown("**Skalierbare Druckvorlage (Arbeitsrapport inkl. QR-Code)**")
-            st.write("Erzeugt ein dynamisches A4-Grid, das über mehrere Seiten skalieren kann.")
+            st.markdown("**Skalierbare Druckvorlage (Fokus auf Ausgeführte Arbeiten)**")
+            st.write("Die Zeit-Spalten wurden auf die Essenz reduziert, um massiven Raum für die Dokumentation zu schaffen.")
             
             print_proj = st.selectbox("Projekt für Druckvorlage:", active_projs, key="admin_print_sel")
             
@@ -364,15 +377,14 @@ def main_flow():
                     qr_url = f"{BASE_URL}?projekt={safe_proj_name}"
                     qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(qr_url)}"
                     
-                    # Generierung der dynamischen Tabellenzeilen (15 Zeilen für maximalen Platz)
-                    table_rows = "".join(["<tr><td></td><td></td><td></td><td></td><td></td><td></td></tr>" for _ in range(15)])
+                    # 5 Spalten statt 6. Reduziert auf das Wesentliche.
+                    table_rows = "".join(["<tr><td></td><td></td><td></td><td></td><td></td></tr>" for _ in range(15)])
                     
-                    # A4-Skalierbare HTML-Synthese
                     html_content = f"""
                     <!DOCTYPE html>
                     <html>
                     <head>
-                        <title>Wochen-Rapport - {print_proj}</title>
+                        <title>Projekt-Rapport - {print_proj}</title>
                         <style>
                             @page {{ size: A4; margin: 15mm; }}
                             body {{ font-family: Arial, sans-serif; color: #333; font-size: 12px; margin: 0; padding: 0; }}
@@ -385,14 +397,14 @@ def main_flow():
                             tr {{ page-break-inside: avoid; page-break-after: auto; }}
                             th, td {{ border: 1px solid #000; padding: 10px; text-align: left; vertical-align: top; }}
                             th {{ background-color: #f0f0f0; }}
-                            td {{ height: 50px; /* Expansions-Raum für Handschrift */ }}
+                            td {{ height: 50px; }}
                         </style>
                     </head>
                     <body>
                         <div class="header">
                             <div class="title-area">
                                 <h1>R. Baumgartner AG</h1>
-                                <h2>Arbeitsrapport (Backup / Wochenbericht)</h2>
+                                <h2>Arbeitsrapport (Backup / Projektbericht)</h2>
                                 <p style="font-size: 14px;"><strong>Projekt:</strong> {print_proj}</p>
                             </div>
                             <div class="qr-area">
@@ -405,9 +417,8 @@ def main_flow():
                                 <tr>
                                     <th style="width: 10%;">Datum</th>
                                     <th style="width: 15%;">Mitarbeiter</th>
-                                    <th style="width: 15%;">Zeit (Von-Bis)</th>
-                                    <th style="width: 10%;">Pause</th>
-                                    <th style="width: 25%;">Ausgeführte Arbeiten</th>
+                                    <th style="width: 10%;">Stunden</th>
+                                    <th style="width: 40%;">Ausgeführte Arbeiten</th>
                                     <th style="width: 25%;">Material / Notizen</th>
                                 </tr>
                             </thead>
