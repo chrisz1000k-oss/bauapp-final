@@ -128,7 +128,7 @@ def main_flow():
     view = st.session_state["view"]
 
     # ---------------------------------------------------------
-    # STARTSEITE
+    # STARTSEITE & LOGIN
     # ---------------------------------------------------------
     if view == "Start":
         st.subheader("Bitte wählen Sie Ihren Bereich aus:")
@@ -143,9 +143,6 @@ def main_flow():
                 st.session_state["view"] = "Admin_Login"
                 st.rerun()
 
-    # ---------------------------------------------------------
-    # LOGIN BEREICHE
-    # ---------------------------------------------------------
     elif view == "Admin_Login":
         if st.button("⬅️ Zurück"):
             st.session_state["view"] = "Start"
@@ -195,14 +192,9 @@ def main_flow():
             st.subheader(f"📋 Rapport: {st.session_state['user_name']}")
         
         df_proj, _ = ds.read_csv(service, PROJEKT_FID, "Projects.csv")
-        if not df_proj.empty and "Status" in df_proj.columns:
-            active_projs = df_proj[df_proj["Status"] == "Aktiv"]["Projekt_Name"].tolist()
-        else:
-            active_projs = ["Bitte Projekte im Admin-Bereich anlegen"]
-
+        active_projs = df_proj[df_proj["Status"] == "Aktiv"]["Projekt_Name"].tolist() if not df_proj.empty and "Status" in df_proj.columns else ["Bitte Projekte im Admin-Bereich anlegen"]
         selected_project = st.selectbox("Projekt:", active_projs)
         
-        # 4 TABS: Inklusive Projekt-Historie (Transparenz)
         tab1, tab2, tab3, tab4 = st.tabs(["📝 Rapport", "📤 Upload", "🖼️ Pläne & Fotos", "📜 Projekt-Historie"])
         
         with tab1:
@@ -216,7 +208,7 @@ def main_flow():
                     f_pause = st.number_input("Pause (Std)", value=0.5, step=0.25)
                     f_reise = st.number_input("Reise (Min)", value=0, step=15)
                 
-                f_arbeit = st.text_area("Arbeitsbeschrieb (Was wurde gemacht?)")
+                f_arbeit = st.text_area("Ausgeführte Arbeiten (Detailliert)")
                 f_mat = st.text_area("Materialeinsatz")
                 f_bem = st.text_input("Bemerkung / Behinderungen")
                 
@@ -224,27 +216,24 @@ def main_flow():
                     process_rapport_saving(service, f_date, f_start, f_end, f_pause, f_reise, f_arbeit, f_mat, f_bem, selected_project, PROJEKT_FID, ZEIT_FID)
 
         with tab2:
-            st.info(f"Bilder für: **{selected_project}**")
+            st.info(f"Medien für: **{selected_project}**")
             files = st.file_uploader("Wählen", accept_multiple_files=True, type=['jpg','png','jpeg'])
-            if st.button("📤 Hochladen", type="primary"):
-                if files:
-                    prog = st.progress(0)
-                    for idx, f in enumerate(files[:PAGINATION_LIMIT]):
-                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        fname = f"{selected_project}_{ts}_{f.name}"
-                        ds.upload_image(service, PHOTOS_FID, fname, io.BytesIO(f.getvalue()), f.type)
-                        prog.progress((idx + 1) / len(files))
-                    st.success("✅ Upload abgeschlossen.")
-                    st.cache_data.clear()
-                    time.sleep(1)
-                    st.rerun()
+            if st.button("📤 Hochladen", type="primary") and files:
+                prog = st.progress(0)
+                for idx, f in enumerate(files[:PAGINATION_LIMIT]):
+                    fname = f"{selected_project}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{f.name}"
+                    ds.upload_image(service, PHOTOS_FID, fname, io.BytesIO(f.getvalue()), f.type)
+                    prog.progress((idx + 1) / len(files))
+                st.success("✅ Upload abgeschlossen.")
+                st.cache_data.clear()
+                time.sleep(1)
+                st.rerun()
 
         with tab3:
             if st.button("🔄 Ansicht aktualisieren"):
                 st.cache_data.clear()
                 st.rerun()
                 
-            # Kombiniert Pläne und Fotos
             all_files = []
             if PHOTOS_FID: all_files.extend(load_project_files_flowing(service, PHOTOS_FID, selected_project))
             if PLAENE_FID: all_files.extend(load_project_files_flowing(service, PLAENE_FID, selected_project))
@@ -263,20 +252,26 @@ def main_flow():
                                 st.download_button(label=f"📥 {img['name']}", data=img_bytes, file_name=img['name'])
                                 
         with tab4:
-            st.markdown(f"**Letzte Tätigkeiten auf: {selected_project}**")
-            df_hist, _ = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
-            if not df_hist.empty and "Projekt" in df_hist.columns:
-                # Filtern und sortieren (Echtzeit-Transparenz)
-                df_proj_hist = df_hist[df_hist["Projekt"] == selected_project].sort_values(by="Datum", ascending=False)
+            st.markdown(f"**Vollständige Schöpfungskette: {selected_project}**")
+            # Daten-Fusion (Jala-Tattva): Zusammenführen von Inhalt und Zeit
+            df_hist_p, _ = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
+            df_hist_z, _ = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
+            
+            if not df_hist_p.empty and not df_hist_z.empty and "Erfasst" in df_hist_p.columns and "Erfasst" in df_hist_z.columns:
+                # Merge basierend auf dem exakten Zeitstempel
+                df_merged = pd.merge(df_hist_p, df_hist_z[["Erfasst", "Start", "Ende", "Stunden_Total"]], on="Erfasst", how="left")
+                df_proj_hist = df_merged[df_merged["Projekt"] == selected_project].sort_values(by="Datum", ascending=False)
+                
                 if df_proj_hist.empty:
                     st.info("Noch keine Rapporte für dieses Projekt.")
                 else:
-                    for _, row in df_proj_hist.head(20).iterrows(): # Zeigt die letzten 20 Einträge
-                        st.markdown(f"🗓️ **{row['Datum']}** | 👷‍♂️ **{row['Mitarbeiter']}**")
-                        st.write(f"_{row['Arbeit']}_")
-                        st.divider()
+                    for _, row in df_proj_hist.head(PAGINATION_LIMIT).iterrows():
+                        with st.expander(f"🗓️ {row['Datum']} | 👷‍♂️ {row['Mitarbeiter']} | ⏱️ {row.get('Stunden_Total', '-')} Std."):
+                            st.markdown(f"**Zeitfenster:** {row.get('Start', '-')} bis {row.get('Ende', '-')} Uhr")
+                            st.markdown(f"**Arbeiten:**\n{row.get('Arbeit', '-')}")
+                            st.markdown(f"**Materialeinsatz:**\n{row.get('Material', '-')}")
             else:
-                st.info("Keine Datenbasis gefunden.")
+                st.info("Datenbasis noch unvollständig.")
 
     # ---------------------------------------------------------
     # ADMIN DASHBOARD
@@ -314,24 +309,18 @@ def main_flow():
             df_proj, fid_proj = ds.read_csv(service, PROJEKT_FID, "Projects.csv")
             if df_proj.empty or "Auftragsnummer" not in df_proj.columns:
                 df_proj = pd.DataFrame({"Projekt_ID": ["P100"], "Auftragsnummer": ["A-01"], "Projekt_Name": ["Baustelle A"], "Status": ["Aktiv"]})
-            
             edit_proj = st.data_editor(df_proj, num_rows="dynamic", key="e_proj", use_container_width=True)
-            if st.button("💾 Projekte Sichern"):
-                ds.save_csv(service, PROJEKT_FID, "Projects.csv", edit_proj, fid_proj)
-                st.success("Aktualisiert.")
+            if st.button("💾 Projekte Sichern"): ds.save_csv(service, PROJEKT_FID, "Projects.csv", edit_proj, fid_proj)
 
             st.markdown("**👷‍♂️ Mitarbeiter**")
             df_emp, fid_emp = ds.read_csv(service, PROJEKT_FID, "Employees.csv")
             if df_emp.empty or "Mitarbeiter_ID" not in df_emp.columns:
                 df_emp = pd.DataFrame({"Mitarbeiter_ID": ["M01"], "Name": ["Christoph Schlorff"], "Status": ["Aktiv"]})
-            
             edit_emp = st.data_editor(df_emp, num_rows="dynamic", key="e_emp", use_container_width=True)
-            if st.button("💾 Mitarbeiter Sichern"):
-                ds.save_csv(service, PROJEKT_FID, "Employees.csv", edit_emp, fid_emp)
-                st.success("Aktualisiert.")
+            if st.button("💾 Mitarbeiter Sichern"): ds.save_csv(service, PROJEKT_FID, "Employees.csv", edit_emp, fid_emp)
 
         with t_docs:
-            st.markdown("**Admin-Souveränität: Dateien verwalten & einsehen**")
+            st.markdown("**Admin-Souveränität: Dateien verwalten**")
             df_proj, _ = ds.read_csv(service, PROJEKT_FID, "Projects.csv")
             active_projs = df_proj["Projekt_Name"].tolist() if not df_proj.empty else ["Keine Projekte gefunden"]
             admin_sel_proj = st.selectbox("Projekt auswählen:", active_projs, key="admin_docs_sel")
@@ -349,30 +338,23 @@ def main_flow():
                     st.success("Fotos hochgeladen.")
             
             st.divider()
-            st.markdown("👁️ **Aktive Projekt-Dateien (Galerie)**")
-            if st.button("🔄 Galerie laden/aktualisieren"):
-                st.cache_data.clear()
-            
+            if st.button("🔄 Galerie laden/aktualisieren"): st.cache_data.clear()
             admin_files = []
             if PHOTOS_FID: admin_files.extend(load_project_files_flowing(service, PHOTOS_FID, admin_sel_proj))
             if PLAENE_FID: admin_files.extend(load_project_files_flowing(service, PLAENE_FID, admin_sel_proj))
             
-            if not admin_files:
-                st.info("Dieses Projekt enthält noch keine Dateien.")
-            else:
+            if admin_files:
                 cols = st.columns(4)
                 for idx, img in enumerate(admin_files):
                     with cols[idx % 4]:
                         img_bytes = get_file_bytes_flowing(service, img['id'])
                         if img_bytes:
-                            if img['name'].lower().endswith(('.png', '.jpg', '.jpeg')):
-                                st.image(img_bytes, caption=img['name'], use_container_width=True)
-                            else:
-                                st.download_button(label=f"📥 {img['name'][:15]}...", data=img_bytes, file_name=img['name'])
+                            if img['name'].lower().endswith(('.png', '.jpg', '.jpeg')): st.image(img_bytes, caption=img['name'], use_container_width=True)
+                            else: st.download_button(label=f"📥 {img['name'][:15]}...", data=img_bytes, file_name=img['name'])
 
         with t_print:
-            st.markdown("**Output-Synthese: Arbeitsrapport inkl. QR-Code (Backup für Bauwagen)**")
-            st.write("Wähle ein Projekt. Lade die HTML-Datei herunter und öffne sie im Browser (Doppelklick), um sie als perfektes PDF auszudrucken.")
+            st.markdown("**Skalierbare Druckvorlage (Arbeitsrapport inkl. QR-Code)**")
+            st.write("Erzeugt ein dynamisches A4-Grid, das über mehrere Seiten skalieren kann.")
             
             print_proj = st.selectbox("Projekt für Druckvorlage:", active_projs, key="admin_print_sel")
             
@@ -382,54 +364,66 @@ def main_flow():
                     qr_url = f"{BASE_URL}?projekt={safe_proj_name}"
                     qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={urllib.parse.quote(qr_url)}"
                     
-                    # HTML-Synthese für sauberen Druck
+                    # Generierung der dynamischen Tabellenzeilen (15 Zeilen für maximalen Platz)
+                    table_rows = "".join(["<tr><td></td><td></td><td></td><td></td><td></td><td></td></tr>" for _ in range(15)])
+                    
+                    # A4-Skalierbare HTML-Synthese
                     html_content = f"""
                     <!DOCTYPE html>
                     <html>
                     <head>
-                        <title>Rapport - {print_proj}</title>
+                        <title>Wochen-Rapport - {print_proj}</title>
                         <style>
-                            body {{ font-family: Arial, sans-serif; padding: 40px; color: #333; }}
-                            .header {{ display: flex; justify-content: space-between; border-bottom: 2px solid #1E3A8A; padding-bottom: 20px; }}
-                            .title-area h1 {{ color: #1E3A8A; margin: 0; }}
-                            .title-area h2 {{ margin: 5px 0 0 0; color: #555; }}
-                            .qr-area img {{ border: 1px solid #ccc; padding: 5px; }}
-                            .table {{ width: 100%; border-collapse: collapse; margin-top: 30px; }}
-                            .table th, .table td {{ border: 1px solid #000; padding: 15px; text-align: left; }}
-                            .table th {{ background-color: #f0f0f0; width: 30%; }}
+                            @page {{ size: A4; margin: 15mm; }}
+                            body {{ font-family: Arial, sans-serif; color: #333; font-size: 12px; margin: 0; padding: 0; }}
+                            .header {{ display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #1E3A8A; padding-bottom: 15px; margin-bottom: 15px; }}
+                            .title-area h1 {{ color: #1E3A8A; margin: 0; font-size: 24px; }}
+                            .title-area h2 {{ margin: 5px 0 0 0; color: #555; font-size: 18px; }}
+                            .qr-area {{ text-align: center; }}
+                            .qr-area img {{ border: 1px solid #ccc; padding: 3px; width: 100px; height: 100px; }}
+                            table {{ width: 100%; border-collapse: collapse; page-break-inside: auto; }}
+                            tr {{ page-break-inside: avoid; page-break-after: auto; }}
+                            th, td {{ border: 1px solid #000; padding: 10px; text-align: left; vertical-align: top; }}
+                            th {{ background-color: #f0f0f0; }}
+                            td {{ height: 50px; /* Expansions-Raum für Handschrift */ }}
                         </style>
                     </head>
                     <body>
                         <div class="header">
                             <div class="title-area">
                                 <h1>R. Baumgartner AG</h1>
-                                <h2>Arbeitsrapport (Backup)</h2>
-                                <p><strong>Projekt:</strong> {print_proj}</p>
+                                <h2>Arbeitsrapport (Backup / Wochenbericht)</h2>
+                                <p style="font-size: 14px;"><strong>Projekt:</strong> {print_proj}</p>
                             </div>
                             <div class="qr-area">
                                 <img src="{qr_api_url}" alt="QR Code">
-                                <p style="text-align:center; font-size:12px; margin:0;">Zum digitalen<br>Rapport scannen</p>
+                                <p style="font-size:10px; margin-top:5px;">Zum digitalen<br>Rapport scannen</p>
                             </div>
                         </div>
-                        <table class="table">
-                            <tr><th>Datum</th><td></td></tr>
-                            <tr><th>Mitarbeiter Name</th><td></td></tr>
-                            <tr><th>Arbeitszeit (Von - Bis)</th><td></td></tr>
-                            <tr><th>Pause / Reisezeit</th><td></td></tr>
-                            <tr><th style="height: 150px;">Ausgeführte Arbeiten</th><td></td></tr>
-                            <tr><th style="height: 100px;">Material & Bemerkungen</th><td></td></tr>
-                            <tr><th>Unterschrift</th><td></td></tr>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th style="width: 10%;">Datum</th>
+                                    <th style="width: 15%;">Mitarbeiter</th>
+                                    <th style="width: 15%;">Zeit (Von-Bis)</th>
+                                    <th style="width: 10%;">Pause</th>
+                                    <th style="width: 25%;">Ausgeführte Arbeiten</th>
+                                    <th style="width: 25%;">Material / Notizen</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {table_rows}
+                            </tbody>
                         </table>
                     </body>
                     </html>
                     """
                     
-                    st.components.v1.html(html_content, height=400, scrolling=True)
-                    
+                    st.components.v1.html(html_content, height=500, scrolling=True)
                     st.download_button(
-                        label="📄 HTML-Druckvorlage herunterladen (Zum Drucken öffnen)",
+                        label="📄 Skalierbares A4-Raster herunterladen (Für Druck öffnen)",
                         data=html_content,
-                        file_name=f"Rapportvorlage_{print_proj}.html",
+                        file_name=f"Rapport_Grid_{print_proj}.html",
                         mime="text/html"
                     )
 
