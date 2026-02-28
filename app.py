@@ -70,7 +70,10 @@ def validate_project_data(df: pd.DataFrame) -> pd.DataFrame:
     if not df.empty:
         for col in required_cols:
             df[col] = df[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''}).str.strip()
+            
+        # Sicherheits-Defaults zur Fehlervermeidung
         df.loc[df['Asbest_Gefahr'] == '', 'Asbest_Gefahr'] = 'Nein'
+        df.loc[df['Status'] == '', 'Status'] = 'Aktiv'
     return df
 
 def validate_time_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -84,20 +87,14 @@ def validate_time_data(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def validate_employee_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Sichert die Personal-Stammdaten extrem robust gegen fehlerhafte Eingaben."""
     required_cols = ["Mitarbeiter_ID", "Name", "PIN", "Status"]
-    
-    # Sicherstellen, dass alle Spalten existieren
     for col in required_cols:
         if col not in df.columns:
             df[col] = ""
             
-    # Formatierung anwenden, falls Daten vorhanden sind
     if not df.empty:
         for col in required_cols:
             df[col] = df[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''}).str.strip()
-        
-        # Sicherheits-Defaults: Wenn Admin Felder leer lässt, automatisch auffüllen
         df.loc[df['PIN'] == '', 'PIN'] = '1234'
         df.loc[df['Status'] == '', 'Status'] = 'Aktiv'
         
@@ -205,9 +202,9 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
     
     active_projs = []
     if not df_proj.empty:
-        # Robuste Filterung für Projekte
         active_mask = df_proj["Status"].astype(str).str.strip().str.lower() == "aktiv"
         active_projs = df_proj[active_mask]["Projekt_Name"].tolist()
+        active_projs = [p for p in active_projs if str(p).strip() != ""]
         
     sel_proj = st.selectbox("Aktuelles Projekt auswählen:", active_projs if active_projs else ["Keine aktiven Projekte gefunden"])
     
@@ -240,6 +237,7 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
             
             st.divider()
             st.markdown("**🚗 Fahrtzeiten (Direktfahrt Wohnort ↔ Baustelle)**")
+            st.info("Hinweis: Fahrten über das Magazin gelten als reguläre Arbeitszeit und müssen hier nicht eingetragen werden. Bei Direktfahrten werden gemäß SPV automatisch 30 Min. pro Weg abgezogen.")
             r1, r2 = st.columns(2)
             with r1: r_hin = st.number_input("Hinweg (Minuten)", value=0, step=5)
             with r2: r_rueck = st.number_input("Rückweg (Minuten)", value=0, step=5)
@@ -248,59 +246,103 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
             st.markdown("**Tätigkeitsnachweis**")
             f_arbeit = st.text_area("Ausgeführte Arbeiten")
             f_mat = st.text_area("Materialeinsatz")
-            f_bem = st.text_input("Bemerkungen")
+            f_bem = st.text_input("Bemerkungen / Behinderungen")
             
             if st.form_submit_button("💾 Rapport zur Prüfung einreichen", type="primary"):
                 process_rapport(service, f_date, f_start, f_end, f_pause, f_arbeit, f_mat, f_bem, sel_proj, r_hin, r_rueck, P_FID, Z_FID, user_name)
 
     with t_abs:
         with st.form("abs_form"):
-            st.markdown("**Meldung von Nicht-Präsenzzeiten**")
+            st.markdown("**Meldung von Nicht-Präsenzzeiten (Multi-Selektion)**")
+            st.info("Tipp: Sie können einen Datumsbereich auswählen, um mehrtägige Absenzen (max. 7 Tage) in einem Vorgang zu verbuchen.")
+            
             c1, c2 = st.columns(2)
-            with c1: drange = st.date_input("Zeitraum wählen", value=(datetime.now(), datetime.now()))
-            with c2: f_a_hours = st.number_input("Soll-Stunden/Tag", min_value=0.0, value=8.5, step=0.25)
+            with c1: 
+                f_a_date_range = st.date_input("Zeitraum wählen", value=(datetime.now(), datetime.now()))
+            with c2: 
+                f_a_hours = st.number_input("Anzurechnende Stunden pro Tag", min_value=0.0, value=8.5, step=0.25)
             
             a_typ = st.selectbox("Kategorie", ["Ferien", "Krankheit", "Unfall (SUVA)", "Feiertag"])
             a_bem = st.text_input("Zusätzliche Bemerkungen")
             a_file = st.file_uploader("📄 Dokumenten-Upload (z.B. Arztzeugnis)", type=['pdf','jpg','png'])
             
-            if st.form_submit_button("💾 Absenz verbuchen", type="primary"):
-                s_date = drange[0] if isinstance(drange, tuple) else drange
-                e_date = drange[1] if isinstance(drange, tuple) and len(drange)==2 else s_date
-                if (e_date - s_date).days + 1 > 7: st.error("System-Einschränkung: Bitte max. 7 Tage am Stück buchen.")
+            if st.form_submit_button("💾 Absenz(en) verbuchen", type="primary"):
+                if isinstance(f_a_date_range, tuple):
+                    if len(f_a_date_range) == 2:
+                        start_date, end_date = f_a_date_range
+                    elif len(f_a_date_range) == 1:
+                        start_date = end_date = f_a_date_range[0]
+                    else:
+                        start_date = end_date = datetime.now().date()
                 else:
-                    if a_file and a_typ == "Krankheit": ds.upload_image(service, PLAN_FID, f"ZEUGNIS_{user_name}_{s_date}_{a_file.name}", io.BytesIO(a_file.getvalue()), a_file.type)
-                    process_absence_batch(service, s_date, e_date, f_a_hours, a_typ, a_bem, sel_proj, P_FID, Z_FID, user_name)
+                    start_date = end_date = f_a_date_range
+                
+                days_diff = (end_date - start_date).days + 1
+                
+                if days_diff > 7:
+                    st.error("System-Einschränkung: Bitte buchen Sie maximal 7 Tage am Stück.")
+                elif days_diff < 1:
+                    st.error("Fehler bei der Datumsauswahl.")
+                else:
+                    if a_file and a_typ == "Krankheit":
+                        fname = f"ZEUGNIS_{st.session_state['user_name']}_{start_date}_{a_file.name}"
+                        ds.upload_image(service, PLAN_FID, fname, io.BytesIO(a_file.getvalue()), a_file.type)
+                    process_absence_batch(service, start_date, end_date, f_a_hours, a_typ, a_bem, sel_proj, P_FID, Z_FID, user_name)
 
     with t_med:
         files = st.file_uploader("Baustellen-Fotos hochladen", accept_multiple_files=True, type=['jpg','png','jpeg'])
         if st.button("📤 Dateien übertragen", type="primary") and files:
-            for f in files[:SPACING_27]: ds.upload_image(service, FOTO_FID, f"{sel_proj}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{f.name}", io.BytesIO(f.getvalue()), f.type)
+            prog = st.progress(0)
+            for idx, f in enumerate(files[:SPACING_27]):
+                fname = f"{sel_proj}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{f.name}"
+                ds.upload_image(service, FOTO_FID, fname, io.BytesIO(f.getvalue()), f.type)
+                prog.progress((idx + 1) / len(files))
             st.success("Übertragung erfolgreich."); st.cache_data.clear(); time.sleep(1); st.rerun()
+            
+        st.divider()
+        if st.button("🔄 Projektdateien anzeigen"): st.cache_data.clear()
+        all_files = []
+        if FOTO_FID: all_files.extend(load_project_files_from_drive(service, FOTO_FID, sel_proj))
+        if PLAN_FID: all_files.extend(load_project_files_from_drive(service, PLAN_FID, sel_proj))
+        if all_files:
+            cols = st.columns(2)
+            for idx, img in enumerate(all_files):
+                with cols[idx % 2]:
+                    img_b = download_file_bytes(service, img['id'])
+                    if img_b:
+                        if img['name'].lower().endswith(('.png', '.jpg', '.jpeg')): st.image(img_b, use_container_width=True)
+                        else: st.download_button(f"📥 {img['name'][:15]}", data=img_b, file_name=img['name'])
 
     with t_hist:
         st.markdown("<h4 style='color:#D4AF37;'>Validierungs-Prozess & Signatur</h4>", unsafe_allow_html=True)
         df_hp, _ = ds.read_csv(service, P_FID, "Baustellen_Rapport.csv")
         df_hz, fid_z = ds.read_csv(service, Z_FID, "Arbeitszeit_AKZ.csv")
+        
         if not df_hp.empty and not df_hz.empty and "Erfasst" in df_hz.columns:
             df_hz = validate_time_data(df_hz)
             df_m = pd.merge(df_hp, df_hz[["Erfasst", "Arbeitszeit_inkl_Reisezeit", "Absenz_Typ", "Status"]], on="Erfasst", how="left")
             hist = df_m[(df_m["Projekt"] == sel_proj) & (df_m["Mitarbeiter"] == user_name)].sort_values(by="Datum", ascending=False)
-            for _, r in hist.head(SPACING_27).iterrows():
-                stat = str(r.get('Status', 'ENTWURF'))
-                col = "🔴" if stat == "ENTWURF" else "🟡" if stat == "FREIGEGEBEN" else "🟢"
-                with st.expander(f"{col} Status: {stat} | Datum: {r['Datum']} | {r.get('Absenz_Typ','')} Total: {r.get('Arbeitszeit_inkl_Reisezeit', '-')} Std."):
-                    st.write(f"**Tätigkeit:** {r.get('Arbeit', '-')}")
-                    if stat == "FREIGEGEBEN":
-                        st.info("Die Bauleitung hat diesen Rapport geprüft. Bitte bestätigen Sie die Richtigkeit.")
-                        if st.button(f"✍️ Digital Signieren", key=f"sig_{r['Erfasst']}"):
-                            idx = df_hz[df_hz['Erfasst'] == r['Erfasst']].index
-                            if not idx.empty:
-                                df_hz.loc[idx, "Status"] = "SIGNIERT"
+            
+            for _, row in hist.head(SPACING_27).iterrows():
+                status_str = str(row.get('Status', 'ENTWURF'))
+                status_color = "🔴" if status_str == "ENTWURF" else "🟡" if status_str == "FREIGEGEBEN" else "🟢"
+                titel = f"Status: {status_color} {status_str} | Datum: {row['Datum']} | {row.get('Absenz_Typ', '')} Total: {row.get('Arbeitszeit_inkl_Reisezeit', '-')} Std."
+                
+                with st.expander(titel):
+                    st.write(f"**Tätigkeit:** {row.get('Arbeit', '-')}")
+                    if status_str == "FREIGEGEBEN":
+                        st.info("Die Bauleitung hat diesen Rapport geprüft. Bitte bestätigen Sie die Richtigkeit digital.")
+                        if st.button(f"✍️ Digital Signieren", key=f"sig_{row['Erfasst']}"):
+                            idx_up = df_hz[df_hz['Erfasst'] == row['Erfasst']].index
+                            if not idx_up.empty:
+                                df_hz.loc[idx_up, "Status"] = "SIGNIERT"
                                 ds.save_csv(service, Z_FID, "Arbeitszeit_AKZ.csv", df_hz, fid_z)
                                 st.cache_data.clear()
-                                st.success("Signatur im System hinterlegt!"); time.sleep(1); st.rerun()
+                                st.success("Signatur erfolgreich im System hinterlegt!"); time.sleep(1); st.rerun()
 
+# ==========================================
+# 7. PROJEKTLEITUNG / ADMIN DASHBOARD
+# ==========================================
 def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     col1, col2 = st.columns([4, 1])
     with col1: st.subheader("🛠️ Projektleitung & Administration")
@@ -311,7 +353,11 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     
     df_proj, fid_proj = ds.read_csv(service, P_FID, "Projects.csv")
     df_proj = validate_project_data(df_proj)
-    active_projs = df_proj["Projekt_Name"].tolist() if not df_proj.empty else ["Leer"]
+    
+    # Filtere leere Projekte für Dropdowns aus
+    active_projs = df_proj["Projekt_Name"].tolist() if not df_proj.empty else []
+    active_projs = [p for p in active_projs if str(p).strip() != ""]
+    if not active_projs: active_projs = ["Keine Projekte gefunden"]
     
     with t_zeit:
         st.markdown("**Compliance-Schritt 1: Prüfung & Admin-Freigabe**")
@@ -330,7 +376,9 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
         st.markdown("**Projekt-Stammdaten**")
         edit_proj = st.data_editor(df_proj, num_rows="dynamic", key="ep", use_container_width=True)
         if st.button("💾 Projekte aktualisieren"): 
-            ds.save_csv(service, P_FID, "Projects.csv", edit_proj, fid_proj)
+            # Verhindert das Speichern leerer Geister-Zeilen
+            clean_proj = edit_proj[edit_proj["Projekt_Name"].astype(str).str.strip() != ""]
+            ds.save_csv(service, P_FID, "Projects.csv", clean_proj, fid_proj)
             st.cache_data.clear()
             if "ep" in st.session_state: del st.session_state["ep"]
             st.success("Projekte erfolgreich aktualisiert.")
@@ -340,27 +388,47 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
         st.markdown("**Personal-Stammdaten & Zugangs-PIN**")
         edit_emp = st.data_editor(df_emp, num_rows="dynamic", key="ee", use_container_width=True)
         if st.button("💾 Personal aktualisieren"): 
-            ds.save_csv(service, P_FID, "Employees.csv", edit_emp, fid_emp)
+            # Verhindert das Speichern leerer Geister-Zeilen
+            clean_emp = edit_emp[edit_emp["Name"].astype(str).str.strip() != ""]
+            ds.save_csv(service, P_FID, "Employees.csv", clean_emp, fid_emp)
             st.cache_data.clear()
             if "ee" in st.session_state: del st.session_state["ee"]
             st.success("Personal erfolgreich aktualisiert.")
 
     with t_docs:
+        st.markdown("**Zentrales Dokumenten-Management**")
         ap = st.selectbox("Projekt-Auswahl:", active_projs, key="docs")
+        
+        # WIEDERHERGESTELLTE UPLOAD-FUNKTION FÜR DEN ADMIN
+        c_u1, c_u2 = st.columns(2)
+        with c_u1:
+            plan_f = st.file_uploader("📤 Pläne (PDF/Bilder)", accept_multiple_files=True, type=['pdf', 'jpg', 'png'])
+            if st.button("Dokumente hochladen") and plan_f and PLAN_FID and ap != "Keine Projekte gefunden":
+                for f in plan_f: ds.upload_image(service, PLAN_FID, f"{ap}_PLAN_{f.name}", io.BytesIO(f.getvalue()), f.type)
+                st.success("Upload erfolgreich."); st.cache_data.clear(); time.sleep(1); st.rerun()
+        with c_u2:
+            foto_f = st.file_uploader("📷 Projektfotos", accept_multiple_files=True, type=['jpg', 'png'])
+            if st.button("Fotos hochladen") and foto_f and ap != "Keine Projekte gefunden":
+                for f in foto_f: ds.upload_image(service, FOTO_FID, f"{ap}_ADMIN_{f.name}", io.BytesIO(f.getvalue()), f.type)
+                st.success("Upload erfolgreich."); st.cache_data.clear(); time.sleep(1); st.rerun()
+        
+        st.divider()
         if st.button("🔄 Datei-Verzeichnis aktualisieren"): st.cache_data.clear()
-        files = load_project_files_from_drive(service, FOTO_FID, ap) + load_project_files_from_drive(service, PLAN_FID, ap)
-        cols = st.columns(4)
-        for i, img in enumerate(files):
-            with cols[i % 4]:
-                b = download_file_bytes(service, img['id'])
-                if b:
-                    if img['name'].lower().endswith(('.png','.jpg','.jpeg')): st.image(b)
-                    else: st.download_button(f"📥 {img['name'][:15]}", b, img['name'])
+        
+        if ap != "Keine Projekte gefunden":
+            files = load_project_files_from_drive(service, FOTO_FID, ap) + load_project_files_from_drive(service, PLAN_FID, ap)
+            cols = st.columns(4)
+            for i, img in enumerate(files):
+                with cols[i % 4]:
+                    b = download_file_bytes(service, img['id'])
+                    if b:
+                        if img['name'].lower().endswith(('.png','.jpg','.jpeg')): st.image(b)
+                        else: st.download_button(f"📥 {img['name'][:15]}", b, img['name'])
 
     with t_print:
         st.markdown("**Physische Verankerung (Druckbericht)**")
         print_proj = st.selectbox("Druck-Auswahl:", active_projs, key="prnt")
-        if st.button("🖨️ Wochenbericht generieren") and print_proj != "Leer":
+        if st.button("🖨️ Wochenbericht generieren") and print_proj != "Keine Projekte gefunden":
             matching_proj = df_proj[df_proj["Projekt_Name"] == print_proj]
             if not matching_proj.empty:
                 pr = matching_proj.iloc[0]
@@ -409,7 +477,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
         if st.checkbox("Löschvorgang verbindlich bestätigen"):
             if typ == "Projekt":
                 tgt = st.selectbox("Projekt:", active_projs)
-                if st.button("🛑 Endgültig löschen"):
+                if st.button("🛑 Endgültig löschen") and tgt != "Keine Projekte gefunden":
                     df_proj = df_proj[df_proj["Projekt_Name"].astype(str).str.strip() != str(tgt).strip()]
                     ds.save_csv(service, P_FID, "Projects.csv", df_proj, fid_proj)
                     for file, id_key in [("Baustellen_Rapport.csv", P_FID), ("Arbeitszeit_AKZ.csv", Z_FID)]:
@@ -422,8 +490,13 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                     st.success("Projektdaten erfolgreich bereinigt."); time.sleep(2); st.rerun()
             else:
                 df_emp, fid_emp = ds.read_csv(service, P_FID, "Employees.csv")
-                tgt = st.selectbox("Mitarbeiter:", df_emp["Name"].tolist() if not df_emp.empty else [])
-                if st.button("🛑 Endgültig löschen"):
+                
+                # Nur nicht-leere Namen auflisten
+                emp_list = [name for name in df_emp["Name"].tolist() if str(name).strip() != ""] if not df_emp.empty else []
+                if not emp_list: emp_list = ["Keine Mitarbeiter gefunden"]
+                
+                tgt = st.selectbox("Mitarbeiter:", emp_list)
+                if st.button("🛑 Endgültig löschen") and tgt != "Keine Mitarbeiter gefunden":
                     df_emp = df_emp[df_emp["Name"].astype(str).str.strip() != str(tgt).strip()]
                     ds.save_csv(service, P_FID, "Employees.csv", df_emp, fid_emp)
                     
@@ -432,7 +505,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                     st.success("Mitarbeiterstammdaten erfolgreich bereinigt."); time.sleep(2); st.rerun()
 
 # ==========================================
-# 6. SYSTEM-KERN (Boot-Sequenz)
+# 8. SYSTEM-KERN (Boot-Sequenz)
 # ==========================================
 def main():
     init_session_state()
@@ -459,34 +532,4 @@ def main():
     elif view == "Admin_Login":
         if st.button("⬅️ Zurück zum Menü"): st.session_state["view"] = "Start"; st.rerun()
         if st.button("Login", type="primary") if st.text_input("Admin PIN", type="password") == str(sec.get("ADMIN_PIN", "1234")) else False:
-            st.session_state.update({"logged_in": True, "user_role": "Admin", "view": "Admin_Dashboard"}); st.rerun()
-
-    elif view == "Mitarbeiter_Login":
-        if st.button("⬅️ Zurück zum Menü"): st.session_state["view"] = "Start"; st.rerun()
-        
-        df_emp, _ = ds.read_csv(s, P_FID, "Employees.csv")
-        df_emp = validate_employee_data(df_emp) 
-        
-        # ROBUSTE VALIDIERUNG: Filtert aktive Mitarbeiter und ignoriert Leerzeichen/Großschreibung
-        if not df_emp.empty:
-            active_mask = df_emp["Status"].astype(str).str.strip().str.lower() == "aktiv"
-            emps = df_emp[active_mask]["Name"].tolist()
-            emps = [name for name in emps if str(name).strip() != ""] # Leere Namen ausblenden
-        else:
-            emps = []
-            
-        sel = st.selectbox("Mitarbeiter auswählen:", emps if emps else ["Leer"])
-        pin_eingabe = st.text_input("Persönliche PIN", type="password")
-        
-        if st.button("Anmelden", type="primary") and sel != "Leer":
-            wahre_pin = str(df_emp[df_emp["Name"] == sel]["PIN"].iloc[0]).strip()
-            if str(pin_eingabe).strip() == wahre_pin:
-                st.session_state.update({"user_name": sel, "view": "Mitarbeiter_Dashboard"}); st.rerun()
-            else:
-                st.error("Zugang verweigert: Die eingegebene PIN ist inkorrekt.")
-
-    elif view == "Mitarbeiter_Dashboard": render_mitarbeiter_portal(s, P_FID, Z_FID, FOTO_FID, PLAN_FID)
-    elif view == "Admin_Dashboard": render_admin_portal(s, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL)
-
-if __name__ == "__main__":
-    main()
+            st.
