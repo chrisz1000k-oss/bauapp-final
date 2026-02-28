@@ -13,6 +13,7 @@ import drive_store as ds
 # ==========================================
 SPACING_27 = 27         # UI Spacing & Pagination Limit
 CACHE_TTL_108 = 108     # Cache Lebensdauer in Sekunden
+MAX_ELEMENTS_114 = 114  # Gesamtstruktur-Limit
 
 st.set_page_config(page_title="R. Baumgartner AG - Projekt-Portal", layout="wide")
 
@@ -46,6 +47,8 @@ def init_session_state():
     if "user_role" not in st.session_state: st.session_state["user_role"] = ""
     if "user_name" not in st.session_state: st.session_state["user_name"] = ""
     if "view" not in st.session_state: st.session_state["view"] = "Start"
+    # Idempotenz: Speicher-Zeitstempel zur Verhinderung von Doppel-Klicks
+    if "last_action_time" not in st.session_state: st.session_state["last_action_time"] = 0.0
 
 def render_header():
     """Baut das Logo und den Titel der App auf."""
@@ -70,7 +73,6 @@ def validate_project_data(df: pd.DataFrame) -> pd.DataFrame:
         for col in required_cols:
             df[col] = df[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''}).str.strip()
             
-        # Sicherheits-Defaults zur Fehlervermeidung
         df.loc[df['Asbest_Gefahr'] == '', 'Asbest_Gefahr'] = 'Nein'
         df.loc[df['Status'] == '', 'Status'] = 'Aktiv'
     return df
@@ -248,7 +250,13 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
             f_bem = st.text_input("Bemerkungen / Behinderungen")
             
             if st.form_submit_button("💾 Rapport zur Prüfung einreichen", type="primary"):
-                process_rapport(service, f_date, f_start, f_end, f_pause, f_arbeit, f_mat, f_bem, sel_proj, r_hin, r_rueck, P_FID, Z_FID, user_name)
+                now = time.time()
+                # Double-Click-Protection (Debouncing 3 Sekunden)
+                if now - st.session_state["last_action_time"] < 3.0:
+                    st.warning("⏳ Speichervorgang läuft bereits. Doppelte Einträge werden blockiert.")
+                else:
+                    st.session_state["last_action_time"] = now
+                    process_rapport(service, f_date, f_start, f_end, f_pause, f_arbeit, f_mat, f_bem, sel_proj, r_hin, r_rueck, P_FID, Z_FID, user_name)
 
     with t_abs:
         with st.form("abs_form"):
@@ -266,27 +274,32 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
             a_file = st.file_uploader("📄 Dokumenten-Upload (z.B. Arztzeugnis)", type=['pdf','jpg','png'])
             
             if st.form_submit_button("💾 Absenz(en) verbuchen", type="primary"):
-                if isinstance(f_a_date_range, tuple):
-                    if len(f_a_date_range) == 2:
-                        start_date, end_date = f_a_date_range
-                    elif len(f_a_date_range) == 1:
-                        start_date = end_date = f_a_date_range[0]
+                now = time.time()
+                if now - st.session_state["last_action_time"] < 3.0:
+                    st.warning("⏳ Speichervorgang läuft bereits. Doppelte Einträge werden blockiert.")
+                else:
+                    st.session_state["last_action_time"] = now
+                    if isinstance(f_a_date_range, tuple):
+                        if len(f_a_date_range) == 2:
+                            start_date, end_date = f_a_date_range
+                        elif len(f_a_date_range) == 1:
+                            start_date = end_date = f_a_date_range[0]
+                        else:
+                            start_date = end_date = datetime.now().date()
                     else:
-                        start_date = end_date = datetime.now().date()
-                else:
-                    start_date = end_date = f_a_date_range
-                
-                days_diff = (end_date - start_date).days + 1
-                
-                if days_diff > 7:
-                    st.error("System-Einschränkung: Bitte buchen Sie maximal 7 Tage am Stück.")
-                elif days_diff < 1:
-                    st.error("Fehler bei der Datumsauswahl.")
-                else:
-                    if a_file and a_typ == "Krankheit":
-                        fname = f"ZEUGNIS_{st.session_state['user_name']}_{start_date}_{a_file.name}"
-                        ds.upload_image(service, PLAN_FID, fname, io.BytesIO(a_file.getvalue()), a_file.type)
-                    process_absence_batch(service, start_date, end_date, f_a_hours, a_typ, a_bem, sel_proj, P_FID, Z_FID, user_name)
+                        start_date = end_date = f_a_date_range
+                    
+                    days_diff = (end_date - start_date).days + 1
+                    
+                    if days_diff > 7:
+                        st.error("System-Einschränkung: Bitte buchen Sie maximal 7 Tage am Stück.")
+                    elif days_diff < 1:
+                        st.error("Fehler bei der Datumsauswahl.")
+                    else:
+                        if a_file and a_typ == "Krankheit":
+                            fname = f"ZEUGNIS_{st.session_state['user_name']}_{start_date}_{a_file.name}"
+                            ds.upload_image(service, PLAN_FID, fname, io.BytesIO(a_file.getvalue()), a_file.type)
+                        process_absence_batch(service, start_date, end_date, f_a_hours, a_typ, a_bem, sel_proj, P_FID, Z_FID, user_name)
 
     with t_med:
         files = st.file_uploader("Baustellen-Fotos hochladen", accept_multiple_files=True, type=['jpg','png','jpeg'])
@@ -313,7 +326,7 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
                         else: st.download_button(f"📥 {img['name'][:15]}", data=img_b, file_name=img['name'])
 
     with t_hist:
-        st.markdown("<h4 style='color:#D4AF37;'>Validierungs-Prozess & Signatur</h4>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#D4AF37;'>Ihre Berichte & Validierung</h4>", unsafe_allow_html=True)
         df_hp, _ = ds.read_csv(service, P_FID, "Baustellen_Rapport.csv")
         df_hz, fid_z = ds.read_csv(service, Z_FID, "Arbeitszeit_AKZ.csv")
         
@@ -359,6 +372,13 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     
     with t_zeit:
         st.markdown("**Compliance-Schritt 1: Prüfung & Admin-Freigabe**")
+        st.info("""
+        **Der Validierungs-Zyklus (Workflow):**
+        1. **Entwurf:** Der Mitarbeiter erfasst seine Zeiten.
+        2. **Freigabe:** Sie prüfen die Einträge und setzen den Status auf 'FREIGEGEBEN'.
+        3. **Bestätigung:** Der Mitarbeiter bestätigt die Freigabe digital (Status ändert sich zu 'SIGNIERT').
+        4. **Unterschrift:** Sie drucken den Bericht unter "🖨️ Berichte" aus. Die Handschrift des Mitarbeiters besiegelt das Dokument rechtssicher.
+        """)
         df_z, fid_z = ds.read_csv(service, Z_FID, "Arbeitszeit_AKZ.csv")
         if not df_z.empty:
             df_z = validate_time_data(df_z)
@@ -435,6 +455,10 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                 k_name, k_kontakt, k_adresse, k_telefon, f_zem, f_sil, asb = "", "", "", "", "-", "-", ""
 
             qr = f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={urllib.parse.quote(f'{BASE_URL}?projekt={urllib.parse.quote(print_proj)}')}"
+            
+            # Neukonstruktion der Druckvorlage: Optimiert für manuelle/handschriftliche Nachträge
+            html_rows = "".join(["<tr><td style='border:1px solid #aaaaaa; height:45px;'></td><td style='border:1px solid #aaaaaa; height:45px;'></td><td style='border:1px solid #aaaaaa; height:45px;'></td></tr>" for _ in range(15)])
+            
             html = f"""<html><body style="font-family:Arial;font-size:12px;background:#fff;color:#000;">
             <div style="display:flex;justify-content:space-between;border-bottom:2px solid #000;padding-bottom:15px;margin-bottom:20px;">
                 <div><h1 style="margin:0;">R. Baumgartner AG</h1><p><b>Projekt:</b> {print_proj}</p>
@@ -442,9 +466,19 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                 <div><p>Zementfuge: {f_zem}<br>Silikonfuge: {f_sil}</p>{asb}</div>
                 <div><img src="{qr}" width="100"></div>
             </div>
-            <table style="width:100%;border-collapse:collapse;"><tr><th style="border:1px solid #000;padding:10px;">Datum / Mitarbeiter / Stunden / Ausgeführte Arbeiten</th></tr>
-            {"".join(["<tr><td style='border:1px solid #000;height:50px;'></td></tr>" for _ in range(15)])}</table>
-            <div style="margin-top:54px;border-top:1px solid #000;width:300px;padding-top:10px;">Rechtsverbindliche Unterschrift</div></body></html>"""
+            
+            <table style="width:100%; border-collapse:collapse; margin-top:20px;">
+                <tr>
+                    <th style="border:1px solid #aaaaaa; padding:10px; width:15%; text-align:left; background-color:#f9f9f9;">Datum</th>
+                    <th style="border:1px solid #aaaaaa; padding:10px; width:70%; text-align:left; background-color:#f9f9f9;">Ausgeführte Tätigkeit (Details)</th>
+                    <th style="border:1px solid #aaaaaa; padding:10px; width:15%; text-align:center; background-color:#f9f9f9;">Stunden</th>
+                </tr>
+                {html_rows}
+            </table>
+            
+            <div style="margin-top:54px; border-top:1px solid #000; width:300px; padding-top:10px;">Rechtsverbindliche Unterschrift</div>
+            </body></html>"""
+            
             st.components.v1.html(html, height=500, scrolling=True)
             st.download_button("📄 HTML Vorlage herunterladen", html, f"Rapport_{print_proj}.html", "text/html")
 
