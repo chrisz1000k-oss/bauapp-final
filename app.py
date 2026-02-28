@@ -13,7 +13,6 @@ import drive_store as ds
 # ==========================================
 SPACING_27 = 27         # UI Spacing & Pagination Limit
 CACHE_TTL_108 = 108     # Cache Lebensdauer in Sekunden
-MAX_ELEMENTS_114 = 114  # Gesamtstruktur-Limit
 
 st.set_page_config(page_title="R. Baumgartner AG - Projekt-Portal", layout="wide")
 
@@ -354,7 +353,6 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     df_proj, fid_proj = ds.read_csv(service, P_FID, "Projects.csv")
     df_proj = validate_project_data(df_proj)
     
-    # Filtere leere Projekte für Dropdowns aus
     active_projs = df_proj["Projekt_Name"].tolist() if not df_proj.empty else []
     active_projs = [p for p in active_projs if str(p).strip() != ""]
     if not active_projs: active_projs = ["Keine Projekte gefunden"]
@@ -376,7 +374,6 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
         st.markdown("**Projekt-Stammdaten**")
         edit_proj = st.data_editor(df_proj, num_rows="dynamic", key="ep", use_container_width=True)
         if st.button("💾 Projekte aktualisieren"): 
-            # Verhindert das Speichern leerer Geister-Zeilen
             clean_proj = edit_proj[edit_proj["Projekt_Name"].astype(str).str.strip() != ""]
             ds.save_csv(service, P_FID, "Projects.csv", clean_proj, fid_proj)
             st.cache_data.clear()
@@ -388,7 +385,6 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
         st.markdown("**Personal-Stammdaten & Zugangs-PIN**")
         edit_emp = st.data_editor(df_emp, num_rows="dynamic", key="ee", use_container_width=True)
         if st.button("💾 Personal aktualisieren"): 
-            # Verhindert das Speichern leerer Geister-Zeilen
             clean_emp = edit_emp[edit_emp["Name"].astype(str).str.strip() != ""]
             ds.save_csv(service, P_FID, "Employees.csv", clean_emp, fid_emp)
             st.cache_data.clear()
@@ -399,7 +395,6 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
         st.markdown("**Zentrales Dokumenten-Management**")
         ap = st.selectbox("Projekt-Auswahl:", active_projs, key="docs")
         
-        # WIEDERHERGESTELLTE UPLOAD-FUNKTION FÜR DEN ADMIN
         c_u1, c_u2 = st.columns(2)
         with c_u1:
             plan_f = st.file_uploader("📤 Pläne (PDF/Bilder)", accept_multiple_files=True, type=['pdf', 'jpg', 'png'])
@@ -491,7 +486,6 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
             else:
                 df_emp, fid_emp = ds.read_csv(service, P_FID, "Employees.csv")
                 
-                # Nur nicht-leere Namen auflisten
                 emp_list = [name for name in df_emp["Name"].tolist() if str(name).strip() != ""] if not df_emp.empty else []
                 if not emp_list: emp_list = ["Keine Mitarbeiter gefunden"]
                 
@@ -532,4 +526,33 @@ def main():
     elif view == "Admin_Login":
         if st.button("⬅️ Zurück zum Menü"): st.session_state["view"] = "Start"; st.rerun()
         if st.button("Login", type="primary") if st.text_input("Admin PIN", type="password") == str(sec.get("ADMIN_PIN", "1234")) else False:
-            st.
+            st.session_state.update({"logged_in": True, "user_role": "Admin", "view": "Admin_Dashboard"}); st.rerun()
+
+    elif view == "Mitarbeiter_Login":
+        if st.button("⬅️ Zurück zum Menü"): st.session_state["view"] = "Start"; st.rerun()
+        
+        df_emp, _ = ds.read_csv(s, P_FID, "Employees.csv")
+        df_emp = validate_employee_data(df_emp) 
+        
+        if not df_emp.empty:
+            active_mask = df_emp["Status"].astype(str).str.strip().str.lower() == "aktiv"
+            emps = df_emp[active_mask]["Name"].tolist()
+            emps = [name for name in emps if str(name).strip() != ""] 
+        else:
+            emps = []
+            
+        sel = st.selectbox("Mitarbeiter auswählen:", emps if emps else ["Keine Profile gefunden"])
+        pin_eingabe = st.text_input("Persönliche PIN", type="password")
+        
+        if st.button("Anmelden", type="primary") and sel != "Keine Profile gefunden":
+            wahre_pin = str(df_emp[df_emp["Name"] == sel]["PIN"].iloc[0]).strip()
+            if str(pin_eingabe).strip() == wahre_pin:
+                st.session_state.update({"user_name": sel, "view": "Mitarbeiter_Dashboard"}); st.rerun()
+            else:
+                st.error("Zugang verweigert: Die eingegebene PIN ist inkorrekt.")
+
+    elif view == "Mitarbeiter_Dashboard": render_mitarbeiter_portal(s, P_FID, Z_FID, FOTO_FID, PLAN_FID)
+    elif view == "Admin_Dashboard": render_admin_portal(s, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL)
+
+if __name__ == "__main__":
+    main()
