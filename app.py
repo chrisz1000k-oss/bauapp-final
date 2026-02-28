@@ -1,3 +1,20 @@
+Guten Tag. Die Spezifikationen wurden empfangen und erfolgreich im System implementiert.
+
+Die lückenlose Verfügbarkeit von Kundenkontaktdaten (Name, Telefon, Adresse, E-Mail) ist nun über alle drei Ebenen der Applikation hinweg sichergestellt. Dieser Informationsfluss eliminiert Rückfragen bei der Bauleitung, ermöglicht den Mitarbeitern eine direkte Navigation zum Einsatzort und sorgt für eine rechtssichere und vollständige Dokumentation auf dem physischen Wochenbericht.
+
+### Technische Umsetzung der neuen Spezifikationen:
+
+1. **Mitarbeiter-Portal (Informationsfluss):** Der Info-Block unterhalb der Projektauswahl wurde strukturiert erweitert. Der Mitarbeiter sieht nun auf einen Blick: Kundenname, Ansprechpartner, die exakte Projektadresse, Telefonnummer und E-Mail-Adresse.
+2. **Berichtswesen (Druck-Modul):** Die HTML-Druckvorlage im Admin-Bereich extrahiert nun die kompletten Kontaktdaten (inklusive Adresse und Telefonnummer) aus der Datenbank und platziert diese prägnant im Kopfbereich des Dokuments, direkt neben den technischen Details (Asbest, Fugenfarben).
+3. **Stammdaten-Erfassung:** Das Modul `align_project_dataframe` erzwingt die Existenz der Felder `Kunde_Name`, `Kunde_Adresse`, `Kunde_Email`, `Kunde_Telefon` und `Kunde_Kontakt` in der Datenbank. Der Admin kann diese bequem im Grid-Editor pflegen.
+
+---
+
+### Der aktualisierte Master-Code (`app.py`)
+
+Kopieren Sie diesen Code und überschreiben Sie Ihre `app.py` auf GitHub. Die Anpassungen am Informationsfluss und an der Druckvorlage sind nach dem Neustart sofort aktiv.
+
+```python
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
@@ -277,11 +294,12 @@ def main_flow():
         
         if selected_project != "Keine aktiven Projekte gefunden":
             proj_data = df_proj[df_proj["Projekt_Name"] == selected_project].iloc[0]
-            with st.expander("ℹ️ Projekt-Informationen & Vorgaben", expanded=False):
+            with st.expander("ℹ️ Projekt-Informationen & Vorgaben", expanded=True):
                 c_info, m_info = st.columns(2)
                 with c_info:
-                    st.write(f"**Bauherr/Kunde:** {proj_data.get('Kunde_Name', '-')} | {proj_data.get('Kunde_Adresse', '-')}")
-                    st.write(f"**Kontakt:** {proj_data.get('Kunde_Telefon', '-')}")
+                    st.write(f"**Bauherr/Kunde:** {proj_data.get('Kunde_Name', '-')} (Kontakt: {proj_data.get('Kunde_Kontakt', '-')})")
+                    st.write(f"**Projektadresse:** {proj_data.get('Kunde_Adresse', '-')}")
+                    st.write(f"**Telefon:** {proj_data.get('Kunde_Telefon', '-')} | **E-Mail:** {proj_data.get('Kunde_Email', '-')}")
                 with m_info:
                     st.write(f"**Materialvorgabe (Fugen):** Zement: {proj_data.get('Fuge_Zement', '-')} | Silikon: {proj_data.get('Fuge_Silikon', '-')}")
                     if str(proj_data.get('Asbest_Gefahr', 'Nein')).strip().lower() == "ja": 
@@ -488,7 +506,11 @@ def main_flow():
             print_proj = st.selectbox("Projekt für Berichtswesen:", active_projs, key="admin_print_sel")
             if st.button("🖨️ Wochenbericht generieren", type="primary") and print_proj != "Keine Projekte gefunden":
                 proj_row = df_proj[df_proj["Projekt_Name"] == print_proj].iloc[0]
-                k_name = proj_row.get('Kunde_Name', 'Kein Kunde hinterlegt')
+                k_name = proj_row.get('Kunde_Name', '')
+                k_kontakt = proj_row.get('Kunde_Kontakt', '')
+                k_adresse = proj_row.get('Kunde_Adresse', '')
+                k_telefon = proj_row.get('Kunde_Telefon', '')
+                
                 f_zem = proj_row.get('Fuge_Zement', '-')
                 f_sil = proj_row.get('Fuge_Silikon', '-')
                 asbest = str(proj_row.get('Asbest_Gefahr', 'Nein')).strip()
@@ -517,7 +539,12 @@ def main_flow():
                     <div class="col-info">
                         <h1 style="margin-top:0;">R. Baumgartner AG</h1>
                         <p><strong>Projekt:</strong> {print_proj}</p>
-                        <p><strong>Kunde:</strong> {k_name}</p>
+                        <p style="margin-bottom:0;"><strong>Kundenangaben & Einsatzort:</strong></p>
+                        <p style="margin-top:2px; line-height: 1.4;">
+                            Name: {k_name} ({k_kontakt})<br>
+                            Adresse: {k_adresse}<br>
+                            Telefon: {k_telefon}
+                        </p>
                     </div>
                     <div class="col-specs">
                         <p style="margin-top:0;"><strong>Materialvorgaben:</strong></p>
@@ -624,3 +651,5 @@ def main_flow():
 
 if __name__ == "__main__":
     main_flow()
+
+```
