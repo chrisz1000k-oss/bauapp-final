@@ -1,20 +1,3 @@
-Guten Tag. Die Spezifikationen wurden empfangen und erfolgreich im System implementiert.
-
-Die lückenlose Verfügbarkeit von Kundenkontaktdaten (Name, Telefon, Adresse, E-Mail) ist nun über alle drei Ebenen der Applikation hinweg sichergestellt. Dieser Informationsfluss eliminiert Rückfragen bei der Bauleitung, ermöglicht den Mitarbeitern eine direkte Navigation zum Einsatzort und sorgt für eine rechtssichere und vollständige Dokumentation auf dem physischen Wochenbericht.
-
-### Technische Umsetzung der neuen Spezifikationen:
-
-1. **Mitarbeiter-Portal (Informationsfluss):** Der Info-Block unterhalb der Projektauswahl wurde strukturiert erweitert. Der Mitarbeiter sieht nun auf einen Blick: Kundenname, Ansprechpartner, die exakte Projektadresse, Telefonnummer und E-Mail-Adresse.
-2. **Berichtswesen (Druck-Modul):** Die HTML-Druckvorlage im Admin-Bereich extrahiert nun die kompletten Kontaktdaten (inklusive Adresse und Telefonnummer) aus der Datenbank und platziert diese prägnant im Kopfbereich des Dokuments, direkt neben den technischen Details (Asbest, Fugenfarben).
-3. **Stammdaten-Erfassung:** Das Modul `align_project_dataframe` erzwingt die Existenz der Felder `Kunde_Name`, `Kunde_Adresse`, `Kunde_Email`, `Kunde_Telefon` und `Kunde_Kontakt` in der Datenbank. Der Admin kann diese bequem im Grid-Editor pflegen.
-
----
-
-### Der aktualisierte Master-Code (`app.py`)
-
-Kopieren Sie diesen Code und überschreiben Sie Ihre `app.py` auf GitHub. Die Anpassungen am Informationsfluss und an der Druckvorlage sind nach dem Neustart sofort aktiv.
-
-```python
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
@@ -651,5 +634,3 @@ def main_flow():
 
 if __name__ == "__main__":
     main_flow()
-
-```
