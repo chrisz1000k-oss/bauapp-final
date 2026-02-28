@@ -115,8 +115,16 @@ def render_header():
 
 def align_project_dataframe(df):
     expected_cols = ["Projekt_ID", "Auftragsnummer", "Projekt_Name", "Status", "Kunde_Name", "Kunde_Adresse", "Kunde_Email", "Kunde_Telefon", "Kunde_Kontakt", "Fuge_Zement", "Fuge_Silikon", "Asbest_Gefahr"]
+    
+    # 1. Sicherstellen, dass alle Spalten existieren
     for col in expected_cols:
-        if col not in df.columns: df[col] = "Nein" if col == "Asbest_Gefahr" else ""
+        if col not in df.columns: 
+            df[col] = "Nein" if col == "Asbest_Gefahr" else ""
+            
+    # 2. BUGFIX: Zwingend alle Spalten als Text formatieren, damit Eingaben von Buchstaben nicht blockiert werden
+    for col in expected_cols:
+        df[col] = df[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''})
+        
     return df
 
 def align_zeit_dataframe(df):
@@ -449,6 +457,11 @@ def main_flow():
             st.markdown("**👷‍♂️ Personal-Stammdaten**")
             if df_emp.empty or "Mitarbeiter_ID" not in df_emp.columns:
                 df_emp = pd.DataFrame({"Mitarbeiter_ID": ["M01"], "Name": ["Christoph Schlorff"], "Status": ["Aktiv"]})
+                
+            # BUGFIX Personal: Text-Formatierung erzwingen
+            for col in df_emp.columns:
+                df_emp[col] = df_emp[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''})
+                
             edit_emp = st.data_editor(df_emp, num_rows="dynamic", key="e_emp", use_container_width=True)
             if st.button("💾 Personal aktualisieren"): ds.save_csv(service, PROJEKT_FID, "Employees.csv", edit_emp, fid_emp)
 
