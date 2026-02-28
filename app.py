@@ -88,7 +88,6 @@ def get_file_bytes_flowing(_service, file_id: str):
         return None
 
 def shiva_delete_assets(_service, keyword, folders):
-    """Vernichtet alle physischen Dateien unwiderruflich aus dem Akasha (Drive)."""
     for fid in folders:
         if not fid: continue
         query = f"'{fid}' in parents and name contains '{keyword}'"
@@ -344,7 +343,8 @@ def main_flow():
         with col2:
             if st.button("🚪 Logout", use_container_width=True): st.session_state["logged_in"] = False; st.session_state["view"] = "Start"; st.rerun()
         
-        t_zeit, t_bau, t_stam, t_docs, t_print, t_shiva = st.tabs(["🕒 Validierung", "🏗️ Rapporte", "⚙️ Stammdaten", "📂 Medien", "🖨️ Druck", "🔥 Shiva"])
+        # NEUES CHAKRA: 📥 AZK-Alchemist hinzugefügt
+        t_zeit, t_bau, t_stam, t_docs, t_print, t_alchemist, t_shiva = st.tabs(["🕒 Validierung", "🏗️ Rapporte", "⚙️ Stammdaten", "📂 Medien", "🖨️ Druck", "📥 AZK-Alchemist", "🔥 Shiva"])
         
         with t_zeit:
             st.markdown("**Das 1. Siegel (Admin-Freigabe)**")
@@ -412,7 +412,6 @@ def main_flow():
 
         with t_print:
             st.markdown("**Das 3. Siegel: Physische Manifestation (Druckvorlage)**")
-            st.info("💡 Die Druckvorlage invertiert die Farben für den Papiertausdruck automatisch (Weißer Hintergrund).")
             print_proj = st.selectbox("Projekt für Druckvorlage:", active_projs, key="admin_print_sel")
             if st.button("🖨️ Druckvorlage generieren", type="primary") and print_proj != "Keine Projekte gefunden":
                 safe_proj_name = urllib.parse.quote(print_proj)
@@ -420,7 +419,6 @@ def main_flow():
                 qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={urllib.parse.quote(qr_url)}"
                 table_rows = "".join(["<tr><td></td><td></td><td></td><td></td><td></td></tr>" for _ in range(15)])
                 
-                # HTML erzwingt schwarz auf weiß für den physischen Druck
                 html_content = f"""
                 <!DOCTYPE html><html><head><title>Rapport - {print_proj}</title>
                 <style>
@@ -440,6 +438,64 @@ def main_flow():
                 """
                 st.components.v1.html(html_content, height=500, scrolling=True)
                 st.download_button("📄 HTML für Druck laden", data=html_content, file_name=f"Rapport_{print_proj}.html", mime="text/html")
+
+        # --- DAS NEUE CHAKRA: AZK-ALCHEMIST ---
+        with t_alchemist:
+            st.markdown("<h3 style='color:#D4AF37;'>Die AZK-Konvergenz (Export-Alchemist)</h3>", unsafe_allow_html=True)
+            st.write("Verwandelt versiegelte Rapporte in fehlerfreie Buchhaltungsdaten (Excel).")
+            
+            df_z, _ = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
+            if not df_z.empty:
+                df_z = align_zeit_dataframe(df_z)
+                
+                export_status = st.selectbox("Welche Siegel-Stufe soll exportiert werden?", 
+                                           ["Nur SIGNIERT (Höchste Sicherheit)", "FREIGEGEBEN & SIGNIERT", "Alle (Inklusive Entwürfe)"])
+                
+                if export_status == "Nur SIGNIERT (Höchste Sicherheit)":
+                    df_export = df_z[df_z["Status"] == "SIGNIERT"]
+                elif export_status == "FREIGEGEBEN & SIGNIERT":
+                    df_export = df_z[df_z["Status"].isin(["FREIGEGEBEN", "SIGNIERT"])]
+                else:
+                    df_export = df_z
+                
+                if not df_export.empty:
+                    df_export['Datum'] = pd.to_datetime(df_export['Datum'])
+                    df_export['Monat'] = df_export['Datum'].dt.strftime('%Y-%m')
+                    monate = sorted(df_export['Monat'].unique().tolist(), reverse=True)
+                    
+                    sel_monat = st.selectbox("Monat für den Export wählen:", monate)
+                    df_monat = df_export[df_export['Monat'] == sel_monat].copy()
+                    
+                    # Formatiert exakt für einfaches "Copy & Paste" in die Excel-Tabelle
+                    df_clean = df_monat[["Datum", "Mitarbeiter", "Projekt", "Stunden_Total", "Reisezeit_bezahlt_Min", "Arbeitszeit_inkl_Reisezeit", "Absenz_Typ", "Status"]].copy()
+                    df_clean.rename(columns={
+                        "Stunden_Total": "Arbeit (Std)", 
+                        "Reisezeit_bezahlt_Min": "Reise (Min)", 
+                        "Arbeitszeit_inkl_Reisezeit": "Total (Std)",
+                        "Absenz_Typ": "Absenz (Grund)"
+                    }, inplace=True)
+                    
+                    df_clean['Datum'] = df_clean['Datum'].dt.strftime('%d.%m.%Y')
+                    
+                    st.dataframe(df_clean, use_container_width=True)
+                    
+                    # Die Alchemie: Generierung der echten Excel-Datei
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        df_clean.to_excel(writer, index=False, sheet_name='AZK_Import')
+                    excel_data = output.getvalue()
+                    
+                    st.download_button(
+                        label="📥 Excel-Alchemie herunterladen (.xlsx)",
+                        data=excel_data,
+                        file_name=f"AZK_Export_{sel_monat}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary"
+                    )
+                else:
+                    st.info("In dieser Siegel-Stufe ruhen noch keine Daten.")
+            else:
+                st.info("Das Archiv der Zeit ist noch leer.")
 
         with t_shiva:
             st.markdown("<h2 style='color: #ff4b4b;'>🔥 Shiva-Modus (Auflösung)</h2>", unsafe_allow_html=True)
