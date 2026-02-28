@@ -168,7 +168,6 @@ def process_single_rapport(service, f_date, f_start, f_end, f_pause_min, f_arbei
     st.success(f"✅ Rapport erfasst. Netto-Arbeit: {work_hours}h | Vergütete Reisezeit: {reise_min_bezahlt} Min. | Total: {total_inkl_reise}h")
 
 def process_batch_absenz(service, start_date, end_date, f_hours, a_typ, f_bem, sel_proj, PROJEKT_FID, ZEIT_FID):
-    """Verarbeitet mehrtägige Absenzen in einem einzigen Batch-Vorgang zur Schonung der API."""
     if sel_proj == "Keine aktiven Projekte gefunden" or not sel_proj:
         st.error("System-Fehler: Bitte wählen Sie ein gültiges Projekt aus.")
         return
@@ -323,7 +322,6 @@ def main_flow():
                 
                 c1, c2 = st.columns(2)
                 with c1: 
-                    # Date-Range-Picker (Rückgabe als Tuple)
                     f_a_date_range = st.date_input("Zeitraum wählen", value=(datetime.now(), datetime.now()))
                 with c2: 
                     f_a_hours = st.number_input("Anzurechnende Stunden pro Tag", min_value=0.0, value=8.5, step=0.25)
@@ -333,7 +331,6 @@ def main_flow():
                 a_file = st.file_uploader("📄 Dokumenten-Upload (z.B. Arztzeugnis)", type=['pdf','jpg','png'])
                 
                 if st.form_submit_button("💾 Absenz(en) verbuchen", type="primary"):
-                    # Validierung der Date-Range
                     if isinstance(f_a_date_range, tuple):
                         if len(f_a_date_range) == 2:
                             start_date, end_date = f_a_date_range
@@ -351,12 +348,9 @@ def main_flow():
                     elif days_diff < 1:
                         st.error("Fehler bei der Datumsauswahl.")
                     else:
-                        # Dokumenten-Upload nur einmalig pro Batch
                         if a_file and a_typ == "Krankheit":
                             fname = f"ZEUGNIS_{st.session_state['user_name']}_{start_date}_{a_file.name}"
                             ds.upload_image(service, PLAENE_FID, fname, io.BytesIO(a_file.getvalue()), a_file.type)
-                        
-                        # Ausführung des Batch-Prozesses
                         process_batch_absenz(service, start_date, end_date, f_a_hours, a_typ, a_bem, selected_project, PROJEKT_FID, ZEIT_FID)
 
         with t_med:
@@ -493,6 +487,14 @@ def main_flow():
             st.info("Hinweis: Der Export invertiert die Farben für einen ressourcenschonenden, papierbasierten Druck.")
             print_proj = st.selectbox("Projekt für Berichtswesen:", active_projs, key="admin_print_sel")
             if st.button("🖨️ Wochenbericht generieren", type="primary") and print_proj != "Keine Projekte gefunden":
+                proj_row = df_proj[df_proj["Projekt_Name"] == print_proj].iloc[0]
+                k_name = proj_row.get('Kunde_Name', 'Kein Kunde hinterlegt')
+                f_zem = proj_row.get('Fuge_Zement', '-')
+                f_sil = proj_row.get('Fuge_Silikon', '-')
+                asbest = str(proj_row.get('Asbest_Gefahr', 'Nein')).strip()
+                
+                asbest_html = f"<p style='color:red; font-weight:bold; font-size: 14px;'>⚠️ SICHERHEITSHINWEIS: ASBEST VORHANDEN</p>" if asbest.lower() == "ja" else ""
+
                 safe_proj_name = urllib.parse.quote(print_proj)
                 qr_url = f"{BASE_URL}?projekt={safe_proj_name}"
                 qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={urllib.parse.quote(qr_url)}"
@@ -503,13 +505,30 @@ def main_flow():
                 <style>
                 @page {{ size: A4; margin: 15mm; }} 
                 body {{ font-family: Arial; font-size: 12px; background-color: #ffffff; color: #000000; margin:0; padding:0; }}
-                .h-grid {{ display: flex; justify-content: space-between; border-bottom: 2px solid #000; padding-bottom: 27px; margin-bottom: 27px; }}
+                .h-grid {{ display: flex; justify-content: space-between; border-bottom: 2px solid #000; padding-bottom: 15px; margin-bottom: 20px; }}
+                .col-info {{ width: 50%; }}
+                .col-specs {{ width: 30%; border-left: 1px solid #ccc; padding-left: 15px; }}
+                .col-qr {{ width: 20%; text-align: right; }}
                 table {{ width: 100%; border-collapse: collapse; }} th, td {{ border: 1px solid #000; padding: 10px; }} td {{ height: 50px; }}
                 .sig-box {{ margin-top: 54px; border-top: 1px solid #000; width: 300px; padding-top: 10px; font-weight: bold; }}
                 </style>
                 </head><body>
-                <div class="h-grid"><div><h1>R. Baumgartner AG</h1><p>Projekt-Rapport: {print_proj}</p></div>
-                <div><img src="{qr_api_url}" width="100"><p style="font-size:10px;">Login via QR</p></div></div>
+                <div class="h-grid">
+                    <div class="col-info">
+                        <h1 style="margin-top:0;">R. Baumgartner AG</h1>
+                        <p><strong>Projekt:</strong> {print_proj}</p>
+                        <p><strong>Kunde:</strong> {k_name}</p>
+                    </div>
+                    <div class="col-specs">
+                        <p style="margin-top:0;"><strong>Materialvorgaben:</strong></p>
+                        <p>Zementfuge: {f_zem}<br>Silikonfuge: {f_sil}</p>
+                        {asbest_html}
+                    </div>
+                    <div class="col-qr">
+                        <img src="{qr_api_url}" width="100">
+                        <p style="font-size:10px; margin:5px 0 0 0;">Login via QR</p>
+                    </div>
+                </div>
                 <table><thead><tr><th>Datum</th><th>Name</th><th>Stunden (Netto)</th><th>Ausgeführte Arbeiten / Material</th><th>Notizen</th></tr></thead>
                 <tbody>{table_rows}</tbody></table>
                 <div class="sig-box">Rechtsverbindliche Unterschrift (Mitarbeiter)</div>
