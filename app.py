@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import io
 import urllib.parse
@@ -88,7 +88,6 @@ def get_file_bytes(_service, file_id: str):
         return None
 
 def delete_project_assets(_service, keyword, folders):
-    """Löscht alle mit einem Projekt oder Mitarbeiter verknüpften Dateien unwiderruflich."""
     for fid in folders:
         if not fid: continue
         query = f"'{fid}' in parents and name contains '{keyword}'"
@@ -127,48 +126,36 @@ def align_zeit_dataframe(df):
             df[col] = 0 if "Min" in col or "Arbeitszeit" in col else ("" if col == "Absenz_Typ" or col in ["Start", "Ende"] else "ENTWURF")
     return df
 
-def process_rapport_saving(service, is_absenz, f_date, f_start, f_end, f_pause_min, f_arbeit, f_mat, f_bem, sel_proj, r_hin, r_rueck, absenz_typ, PROJEKT_FID, ZEIT_FID):
-    if sel_proj == "Bitte Projekte im Admin-Bereich anlegen":
+def process_single_rapport(service, f_date, f_start, f_end, f_pause_min, f_arbeit, f_mat, f_bem, sel_proj, r_hin, r_rueck, PROJEKT_FID, ZEIT_FID):
+    if sel_proj == "Keine aktiven Projekte gefunden" or not sel_proj:
         st.error("System-Fehler: Bitte wählen Sie ein gültiges Projekt aus.")
         return
         
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     date_str = f_date.strftime("%Y-%m-%d")
     
-    if is_absenz:
-        # Verbuchung von Nicht-Präsenzzeiten (Urlaub, Krankheit etc.)
-        # Für Absenzen setzen wir standardmäßig 8.5h oder berechnen dies später dynamisch in der AZK
-        f_hours = 8.5 
-        row_projekt = {"Erfasst": ts_str, "Datum": date_str, "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Arbeit": f"ABSENZ: {absenz_typ}", "Material": "", "Bemerkung": f_bem, "Status": "ENTWURF"}
-        row_zeit = {"Erfasst": ts_str, "Datum": date_str, "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Start": "-", "Ende": "-", "Pause_Min": 0, "Stunden_Total": f_hours, "R_Wohn_Bau_Min": 0, "R_Bau_Wohn_Min": 0, "Reisezeit_bezahlt_Min": 0, "Arbeitszeit_inkl_Reisezeit": f_hours, "Absenz_Typ": absenz_typ, "Status": "ENTWURF"}
-        msg = f"✅ Absenz ({absenz_typ}) erfolgreich im System erfasst."
-    else:
-        # Berechnung der Netto-Arbeitszeit
-        t1 = datetime.combine(f_date, f_start)
-        t2 = datetime.combine(f_date, f_end)
-        diff_hours = (t2 - t1).total_seconds() / 3600.0
-        work_hours = round(diff_hours - (f_pause_min / 60.0), 2)
-        
-        if work_hours < 0:
-            st.error("Validierungsfehler: Endzeit abzüglich Pause liegt vor der Startzeit.")
-            return
+    t1 = datetime.combine(f_date, f_start)
+    t2 = datetime.combine(f_date, f_end)
+    diff_hours = (t2 - t1).total_seconds() / 3600.0
+    work_hours = round(diff_hours - (f_pause_min / 60.0), 2)
+    
+    if work_hours < 0:
+        st.error("Validierungsfehler: Endzeit abzüglich Pause liegt vor der Startzeit.")
+        return
 
-        # SPV Reisezeit-Logik (Direktfahrt: 30 Min Abzug pro Weg)
-        bezahlt_hin = max(0, r_hin - 30)
-        bezahlt_rueck = max(0, r_rueck - 30)
-        
-        reise_min_bezahlt = bezahlt_hin + bezahlt_rueck
-        reise_stunden_bezahlt = round(reise_min_bezahlt / 60.0, 2)
-        total_inkl_reise = round(work_hours + reise_stunden_bezahlt, 2)
-        
-        start_str = f_start.strftime("%H:%M")
-        end_str = f_end.strftime("%H:%M")
-        
-        row_projekt = {"Erfasst": ts_str, "Datum": date_str, "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Arbeit": f_arbeit, "Material": f_mat, "Bemerkung": f_bem, "Status": "ENTWURF"}
-        row_zeit = {"Erfasst": ts_str, "Datum": date_str, "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Start": start_str, "Ende": end_str, "Pause_Min": f_pause_min, "Stunden_Total": work_hours, "R_Wohn_Bau_Min": r_hin, "R_Bau_Wohn_Min": r_rueck, "Reisezeit_bezahlt_Min": reise_min_bezahlt, "Arbeitszeit_inkl_Reisezeit": total_inkl_reise, "Absenz_Typ": "", "Status": "ENTWURF"}
-        msg = f"✅ Rapport erfasst. Netto-Arbeit: {work_hours}h | Vergütete Reisezeit: {reise_min_bezahlt} Min. | Total: {total_inkl_reise}h"
-
-    # Datensynchronisation
+    bezahlt_hin = max(0, r_hin - 30)
+    bezahlt_rueck = max(0, r_rueck - 30)
+    
+    reise_min_bezahlt = bezahlt_hin + bezahlt_rueck
+    reise_stunden_bezahlt = round(reise_min_bezahlt / 60.0, 2)
+    total_inkl_reise = round(work_hours + reise_stunden_bezahlt, 2)
+    
+    start_str = f_start.strftime("%H:%M")
+    end_str = f_end.strftime("%H:%M")
+    
+    row_projekt = {"Erfasst": ts_str, "Datum": date_str, "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Arbeit": f_arbeit, "Material": f_mat, "Bemerkung": f_bem, "Status": "ENTWURF"}
+    row_zeit = {"Erfasst": ts_str, "Datum": date_str, "Projekt": sel_proj, "Mitarbeiter": st.session_state["user_name"], "Start": start_str, "Ende": end_str, "Pause_Min": f_pause_min, "Stunden_Total": work_hours, "R_Wohn_Bau_Min": r_hin, "R_Bau_Wohn_Min": r_rueck, "Reisezeit_bezahlt_Min": reise_min_bezahlt, "Arbeitszeit_inkl_Reisezeit": total_inkl_reise, "Absenz_Typ": "", "Status": "ENTWURF"}
+    
     df_p, fid_p = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
     df_p = pd.concat([df_p, pd.DataFrame([row_projekt])], ignore_index=True)
     ds.save_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv", df_p, fid_p)
@@ -178,7 +165,48 @@ def process_rapport_saving(service, is_absenz, f_date, f_start, f_end, f_pause_m
     df_z = pd.concat([df_z, pd.DataFrame([row_zeit])], ignore_index=True)
     ds.save_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
     
-    st.success(msg)
+    st.success(f"✅ Rapport erfasst. Netto-Arbeit: {work_hours}h | Vergütete Reisezeit: {reise_min_bezahlt} Min. | Total: {total_inkl_reise}h")
+
+def process_batch_absenz(service, start_date, end_date, f_hours, a_typ, f_bem, sel_proj, PROJEKT_FID, ZEIT_FID):
+    """Verarbeitet mehrtägige Absenzen in einem einzigen Batch-Vorgang zur Schonung der API."""
+    if sel_proj == "Keine aktiven Projekte gefunden" or not sel_proj:
+        st.error("System-Fehler: Bitte wählen Sie ein gültiges Projekt aus.")
+        return
+        
+    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    days_diff = (end_date - start_date).days + 1
+    
+    rows_projekt = []
+    rows_zeit = []
+    
+    for i in range(days_diff):
+        current_date = start_date + timedelta(days=i)
+        date_str = current_date.strftime("%Y-%m-%d")
+        
+        rows_projekt.append({
+            "Erfasst": ts_str, "Datum": date_str, "Projekt": sel_proj, 
+            "Mitarbeiter": st.session_state["user_name"], "Arbeit": f"ABSENZ: {a_typ}", 
+            "Material": "", "Bemerkung": f_bem, "Status": "ENTWURF"
+        })
+        
+        rows_zeit.append({
+            "Erfasst": ts_str, "Datum": date_str, "Projekt": sel_proj, 
+            "Mitarbeiter": st.session_state["user_name"], "Start": "-", "Ende": "-", 
+            "Pause_Min": 0, "Stunden_Total": f_hours, "R_Wohn_Bau_Min": 0, "R_Bau_Wohn_Min": 0, 
+            "Reisezeit_bezahlt_Min": 0, "Arbeitszeit_inkl_Reisezeit": f_hours, 
+            "Absenz_Typ": a_typ, "Status": "ENTWURF"
+        })
+        
+    df_p, fid_p = ds.read_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv")
+    df_p = pd.concat([df_p, pd.DataFrame(rows_projekt)], ignore_index=True)
+    ds.save_csv(service, PROJEKT_FID, "Baustellen_Rapport.csv", df_p, fid_p)
+    
+    df_z, fid_z = ds.read_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv")
+    df_z = align_zeit_dataframe(df_z)
+    df_z = pd.concat([df_z, pd.DataFrame(rows_zeit)], ignore_index=True)
+    ds.save_csv(service, ZEIT_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
+    
+    st.success(f"✅ Absenz ({a_typ}) für {days_diff} Tag(e) erfolgreich im System erfasst.")
 
 # ==========================================
 # HAUPT-APPLIKATION
@@ -286,25 +314,50 @@ def main_flow():
                 f_bem = st.text_input("Bemerkung / Behinderungen")
                 
                 if st.form_submit_button("💾 Rapport zur Prüfung einreichen", type="primary"):
-                    process_rapport_saving(service, False, f_date, f_start, f_end, f_pause, f_arbeit, f_mat, f_bem, selected_project, r_hin, r_rueck, "", PROJEKT_FID, ZEIT_FID)
+                    process_single_rapport(service, f_date, f_start, f_end, f_pause, f_arbeit, f_mat, f_bem, selected_project, r_hin, r_rueck, PROJEKT_FID, ZEIT_FID)
 
         with t_abs:
             with st.form("abs_form"):
-                st.markdown("**Meldung von Nicht-Präsenzzeiten**")
-                c1, c2 = st.columns(2)
-                with c1: f_a_date = st.date_input("Datum der Absenz", datetime.now())
-                with c2: a_typ = st.selectbox("Kategorie", ["Ferien", "Krankheit", "Unfall (SUVA)", "Feiertag"])
+                st.markdown("**Meldung von Nicht-Präsenzzeiten (Multi-Selektion)**")
+                st.info("Tipp: Sie können einen Datumsbereich auswählen, um mehrtägige Absenzen (max. 7 Tage) in einem Vorgang zu verbuchen.")
                 
+                c1, c2 = st.columns(2)
+                with c1: 
+                    # Date-Range-Picker (Rückgabe als Tuple)
+                    f_a_date_range = st.date_input("Zeitraum wählen", value=(datetime.now(), datetime.now()))
+                with c2: 
+                    f_a_hours = st.number_input("Anzurechnende Stunden pro Tag", min_value=0.0, value=8.5, step=0.25)
+                
+                a_typ = st.selectbox("Kategorie", ["Ferien", "Krankheit", "Unfall (SUVA)", "Feiertag"])
                 a_bem = st.text_input("Zusätzliche Bemerkungen")
                 a_file = st.file_uploader("📄 Dokumenten-Upload (z.B. Arztzeugnis)", type=['pdf','jpg','png'])
                 
-                if st.form_submit_button("💾 Absenz verbuchen", type="primary"):
-                    if a_file and a_typ == "Krankheit":
-                        fname = f"ZEUGNIS_{st.session_state['user_name']}_{f_a_date}_{a_file.name}"
-                        ds.upload_image(service, PLAENE_FID, fname, io.BytesIO(a_file.getvalue()), a_file.type)
-                    # Dummy Start/End times for process logic (ignored for absences)
-                    dummy_time = datetime.strptime("00:00", "%H:%M").time()
-                    process_rapport_saving(service, True, f_a_date, dummy_time, dummy_time, 0, "", "", a_bem, selected_project, 0, 0, a_typ, PROJEKT_FID, ZEIT_FID)
+                if st.form_submit_button("💾 Absenz(en) verbuchen", type="primary"):
+                    # Validierung der Date-Range
+                    if isinstance(f_a_date_range, tuple):
+                        if len(f_a_date_range) == 2:
+                            start_date, end_date = f_a_date_range
+                        elif len(f_a_date_range) == 1:
+                            start_date = end_date = f_a_date_range[0]
+                        else:
+                            start_date = end_date = datetime.now().date()
+                    else:
+                        start_date = end_date = f_a_date_range
+                    
+                    days_diff = (end_date - start_date).days + 1
+                    
+                    if days_diff > 7:
+                        st.error("System-Einschränkung: Bitte buchen Sie maximal 7 Tage am Stück.")
+                    elif days_diff < 1:
+                        st.error("Fehler bei der Datumsauswahl.")
+                    else:
+                        # Dokumenten-Upload nur einmalig pro Batch
+                        if a_file and a_typ == "Krankheit":
+                            fname = f"ZEUGNIS_{st.session_state['user_name']}_{start_date}_{a_file.name}"
+                            ds.upload_image(service, PLAENE_FID, fname, io.BytesIO(a_file.getvalue()), a_file.type)
+                        
+                        # Ausführung des Batch-Prozesses
+                        process_batch_absenz(service, start_date, end_date, f_a_hours, a_typ, a_bem, selected_project, PROJEKT_FID, ZEIT_FID)
 
         with t_med:
             col_up, col_gal = st.columns([1, 2])
