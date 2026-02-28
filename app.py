@@ -84,7 +84,7 @@ def validate_time_data(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def validate_employee_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Sichert die Personal-Stammdaten (Ohne Geister-Einträge zu erzeugen)."""
+    """Sichert die Personal-Stammdaten extrem robust gegen fehlerhafte Eingaben."""
     required_cols = ["Mitarbeiter_ID", "Name", "PIN", "Status"]
     
     # Sicherstellen, dass alle Spalten existieren
@@ -96,8 +96,10 @@ def validate_employee_data(df: pd.DataFrame) -> pd.DataFrame:
     if not df.empty:
         for col in required_cols:
             df[col] = df[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''}).str.strip()
-        # Leere PINs erhalten Standardwert 1234
+        
+        # Sicherheits-Defaults: Wenn Admin Felder leer lässt, automatisch auffüllen
         df.loc[df['PIN'] == '', 'PIN'] = '1234'
+        df.loc[df['Status'] == '', 'Status'] = 'Aktiv'
         
     return df
 
@@ -200,23 +202,36 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
     
     df_proj, _ = ds.read_csv(service, P_FID, "Projects.csv")
     df_proj = validate_project_data(df_proj)
-    active_projs = df_proj[df_proj["Status"] == "Aktiv"]["Projekt_Name"].tolist() if not df_proj.empty else []
     
-    sel_proj = st.selectbox("Aktuelles Projekt:", active_projs if active_projs else ["Keine Projekte"])
-    if sel_proj == "Keine Projekte": return
-
-    proj_data = df_proj[df_proj["Projekt_Name"] == sel_proj].iloc[0]
-    with st.expander("ℹ️ Projekt-Informationen", expanded=True):
-        c1, c2 = st.columns(2)
-        c1.write(f"**Kunde:** {proj_data.get('Kunde_Name')} ({proj_data.get('Kunde_Kontakt')})\n\n**Ort:** {proj_data.get('Kunde_Adresse')}\n\n**Tel:** {proj_data.get('Kunde_Telefon')}")
-        c2.write(f"**Material:** Zementfuge: {proj_data.get('Fuge_Zement')} | Silikonfuge: {proj_data.get('Fuge_Silikon')}")
-        if str(proj_data.get('Asbest_Gefahr')).strip().lower() == "ja": c2.markdown("<p style='color:#ff4b4b; font-weight:bold;'>⚠️ ASBEST VORHANDEN</p>", unsafe_allow_html=True)
+    active_projs = []
+    if not df_proj.empty:
+        # Robuste Filterung für Projekte
+        active_mask = df_proj["Status"].astype(str).str.strip().str.lower() == "aktiv"
+        active_projs = df_proj[active_mask]["Projekt_Name"].tolist()
+        
+    sel_proj = st.selectbox("Aktuelles Projekt auswählen:", active_projs if active_projs else ["Keine aktiven Projekte gefunden"])
+    
+    if sel_proj != "Keine aktiven Projekte gefunden":
+        matching_proj = df_proj[df_proj["Projekt_Name"] == sel_proj]
+        if not matching_proj.empty:
+            proj_data = matching_proj.iloc[0]
+            with st.expander("ℹ️ Projekt-Informationen & Vorgaben", expanded=True):
+                c_info, m_info = st.columns(2)
+                with c_info:
+                    st.write(f"**Bauherr/Kunde:** {proj_data.get('Kunde_Name', '-')} (Kontakt: {proj_data.get('Kunde_Kontakt', '-')})")
+                    st.write(f"**Projektadresse:** {proj_data.get('Kunde_Adresse', '-')}")
+                    st.write(f"**Telefon:** {proj_data.get('Kunde_Telefon', '-')} | **E-Mail:** {proj_data.get('Kunde_Email', '-')}")
+                with m_info:
+                    st.write(f"**Materialvorgabe (Fugen):** Zement: {proj_data.get('Fuge_Zement', '-')} | Silikon: {proj_data.get('Fuge_Silikon', '-')}")
+                    if str(proj_data.get('Asbest_Gefahr', 'Nein')).strip().lower() == "ja": 
+                        st.markdown("<p style='color:#ff4b4b; font-weight:bold;'>⚠️ SICHERHEITSHINWEIS: ASBEST VORHANDEN</p>", unsafe_allow_html=True)
 
     st.write(f"<div style='height: {SPACING_27}px;'></div>", unsafe_allow_html=True)
     t_arb, t_abs, t_med, t_hist = st.tabs(["🛠️ Arbeitszeit", "🏥 Absenzen", "📤 Dokumentation", "📜 Berichte & Signatur"])
     
     with t_arb:
         with st.form("arb_form"):
+            st.markdown("**Arbeitszeit & Pausen**")
             c1, c2, c3, c4 = st.columns(4)
             with c1: f_date = st.date_input("Datum", datetime.now())
             with c2: f_start = st.time_input("Arbeitsbeginn", datetime.strptime("07:00", "%H:%M").time())
@@ -224,10 +239,13 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
             with c4: f_pause = st.number_input("Pausen (Min)", min_value=0, value=30, step=15)
             
             st.divider()
+            st.markdown("**🚗 Fahrtzeiten (Direktfahrt Wohnort ↔ Baustelle)**")
             r1, r2 = st.columns(2)
-            with r1: r_hin = st.number_input("Direktfahrt: Hinweg (Min)", value=0, step=5)
-            with r2: r_rueck = st.number_input("Direktfahrt: Rückweg (Min)", value=0, step=5)
+            with r1: r_hin = st.number_input("Hinweg (Minuten)", value=0, step=5)
+            with r2: r_rueck = st.number_input("Rückweg (Minuten)", value=0, step=5)
             
+            st.divider()
+            st.markdown("**Tätigkeitsnachweis**")
             f_arbeit = st.text_area("Ausgeführte Arbeiten")
             f_mat = st.text_area("Materialeinsatz")
             f_bem = st.text_input("Bemerkungen")
@@ -237,28 +255,31 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
 
     with t_abs:
         with st.form("abs_form"):
+            st.markdown("**Meldung von Nicht-Präsenzzeiten**")
             c1, c2 = st.columns(2)
-            with c1: drange = st.date_input("Zeitraum (Max. 7 Tage)", value=(datetime.now(), datetime.now()))
-            with c2: f_a_hours = st.number_input("Soll-Stunden pro Tag", min_value=0.0, value=8.5, step=0.25)
-            a_typ = st.selectbox("Kategorie", ["Ferien", "Krankheit", "Unfall (SUVA)", "Feiertag"])
-            a_bem = st.text_input("Zusätzliche Notizen")
-            a_file = st.file_uploader("📄 Dokument/Arztzeugnis", type=['pdf','jpg','png'])
+            with c1: drange = st.date_input("Zeitraum wählen", value=(datetime.now(), datetime.now()))
+            with c2: f_a_hours = st.number_input("Soll-Stunden/Tag", min_value=0.0, value=8.5, step=0.25)
             
-            if st.form_submit_button("💾 Absenz(en) verbuchen", type="primary"):
+            a_typ = st.selectbox("Kategorie", ["Ferien", "Krankheit", "Unfall (SUVA)", "Feiertag"])
+            a_bem = st.text_input("Zusätzliche Bemerkungen")
+            a_file = st.file_uploader("📄 Dokumenten-Upload (z.B. Arztzeugnis)", type=['pdf','jpg','png'])
+            
+            if st.form_submit_button("💾 Absenz verbuchen", type="primary"):
                 s_date = drange[0] if isinstance(drange, tuple) else drange
                 e_date = drange[1] if isinstance(drange, tuple) and len(drange)==2 else s_date
-                if (e_date - s_date).days + 1 > 7: st.error("Eingabefehler: Der ausgewählte Zeitraum darf 7 Tage nicht überschreiten.")
+                if (e_date - s_date).days + 1 > 7: st.error("System-Einschränkung: Bitte max. 7 Tage am Stück buchen.")
                 else:
                     if a_file and a_typ == "Krankheit": ds.upload_image(service, PLAN_FID, f"ZEUGNIS_{user_name}_{s_date}_{a_file.name}", io.BytesIO(a_file.getvalue()), a_file.type)
                     process_absence_batch(service, s_date, e_date, f_a_hours, a_typ, a_bem, sel_proj, P_FID, Z_FID, user_name)
 
     with t_med:
-        files = st.file_uploader("Projektdateien hochladen", accept_multiple_files=True, type=['jpg','png','jpeg'])
-        if st.button("📤 Dateien hochladen") and files:
+        files = st.file_uploader("Baustellen-Fotos hochladen", accept_multiple_files=True, type=['jpg','png','jpeg'])
+        if st.button("📤 Dateien übertragen", type="primary") and files:
             for f in files[:SPACING_27]: ds.upload_image(service, FOTO_FID, f"{sel_proj}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{f.name}", io.BytesIO(f.getvalue()), f.type)
-            st.success("Dateien erfolgreich hochgeladen."); st.cache_data.clear(); time.sleep(1); st.rerun()
+            st.success("Übertragung erfolgreich."); st.cache_data.clear(); time.sleep(1); st.rerun()
 
     with t_hist:
+        st.markdown("<h4 style='color:#D4AF37;'>Validierungs-Prozess & Signatur</h4>", unsafe_allow_html=True)
         df_hp, _ = ds.read_csv(service, P_FID, "Baustellen_Rapport.csv")
         df_hz, fid_z = ds.read_csv(service, Z_FID, "Arbeitszeit_AKZ.csv")
         if not df_hp.empty and not df_hz.empty and "Erfasst" in df_hz.columns:
@@ -268,16 +289,17 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
             for _, r in hist.head(SPACING_27).iterrows():
                 stat = str(r.get('Status', 'ENTWURF'))
                 col = "🔴" if stat == "ENTWURF" else "🟡" if stat == "FREIGEGEBEN" else "🟢"
-                with st.expander(f"{col} Status: {stat} | Datum: {r['Datum']} | {r.get('Absenz_Typ','')} Total: {r.get('Arbeitszeit_inkl_Reisezeit')} Std."):
-                    st.write(r.get('Arbeit', '-'))
+                with st.expander(f"{col} Status: {stat} | Datum: {r['Datum']} | {r.get('Absenz_Typ','')} Total: {r.get('Arbeitszeit_inkl_Reisezeit', '-')} Std."):
+                    st.write(f"**Tätigkeit:** {r.get('Arbeit', '-')}")
                     if stat == "FREIGEGEBEN":
+                        st.info("Die Bauleitung hat diesen Rapport geprüft. Bitte bestätigen Sie die Richtigkeit.")
                         if st.button(f"✍️ Digital Signieren", key=f"sig_{r['Erfasst']}"):
                             idx = df_hz[df_hz['Erfasst'] == r['Erfasst']].index
                             if not idx.empty:
                                 df_hz.loc[idx, "Status"] = "SIGNIERT"
                                 ds.save_csv(service, Z_FID, "Arbeitszeit_AKZ.csv", df_hz, fid_z)
                                 st.cache_data.clear()
-                                st.success("Dokument erfolgreich signiert!"); time.sleep(1); st.rerun()
+                                st.success("Signatur im System hinterlegt!"); time.sleep(1); st.rerun()
 
 def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     col1, col2 = st.columns([4, 1])
@@ -292,6 +314,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     active_projs = df_proj["Projekt_Name"].tolist() if not df_proj.empty else ["Leer"]
     
     with t_zeit:
+        st.markdown("**Compliance-Schritt 1: Prüfung & Admin-Freigabe**")
         df_z, fid_z = ds.read_csv(service, Z_FID, "Arbeitszeit_AKZ.csv")
         if not df_z.empty:
             df_z = validate_time_data(df_z)
@@ -304,7 +327,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                 st.success("Daten synchronisiert.")
 
     with t_stam:
-        st.markdown("**Projekte**")
+        st.markdown("**Projekt-Stammdaten**")
         edit_proj = st.data_editor(df_proj, num_rows="dynamic", key="ep", use_container_width=True)
         if st.button("💾 Projekte aktualisieren"): 
             ds.save_csv(service, P_FID, "Projects.csv", edit_proj, fid_proj)
@@ -314,7 +337,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
         
         df_emp, fid_emp = ds.read_csv(service, P_FID, "Employees.csv")
         df_emp = validate_employee_data(df_emp)
-        st.markdown("**Personal & Zugangs-PIN**")
+        st.markdown("**Personal-Stammdaten & Zugangs-PIN**")
         edit_emp = st.data_editor(df_emp, num_rows="dynamic", key="ee", use_container_width=True)
         if st.button("💾 Personal aktualisieren"): 
             ds.save_csv(service, P_FID, "Employees.csv", edit_emp, fid_emp)
@@ -335,16 +358,25 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                     else: st.download_button(f"📥 {img['name'][:15]}", b, img['name'])
 
     with t_print:
+        st.markdown("**Physische Verankerung (Druckbericht)**")
         print_proj = st.selectbox("Druck-Auswahl:", active_projs, key="prnt")
         if st.button("🖨️ Wochenbericht generieren") and print_proj != "Leer":
-            pr = df_proj[df_proj["Projekt_Name"] == print_proj].iloc[0]
-            asb = "<p style='color:red;font-weight:bold;'>⚠️ ASBEST VORHANDEN!</p>" if pr.get('Asbest_Gefahr', '').lower() == "ja" else ""
+            matching_proj = df_proj[df_proj["Projekt_Name"] == print_proj]
+            if not matching_proj.empty:
+                pr = matching_proj.iloc[0]
+                k_name, k_kontakt = pr.get('Kunde_Name', ''), pr.get('Kunde_Kontakt', '')
+                k_adresse, k_telefon = pr.get('Kunde_Adresse', ''), pr.get('Kunde_Telefon', '')
+                f_zem, f_sil = pr.get('Fuge_Zement', '-'), pr.get('Fuge_Silikon', '-')
+                asb = "<p style='color:red;font-weight:bold;'>⚠️ ASBEST VORHANDEN!</p>" if str(pr.get('Asbest_Gefahr', '')).lower() == "ja" else ""
+            else:
+                k_name, k_kontakt, k_adresse, k_telefon, f_zem, f_sil, asb = "", "", "", "", "-", "-", ""
+
             qr = f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={urllib.parse.quote(f'{BASE_URL}?projekt={urllib.parse.quote(print_proj)}')}"
             html = f"""<html><body style="font-family:Arial;font-size:12px;background:#fff;color:#000;">
             <div style="display:flex;justify-content:space-between;border-bottom:2px solid #000;padding-bottom:15px;margin-bottom:20px;">
                 <div><h1 style="margin:0;">R. Baumgartner AG</h1><p><b>Projekt:</b> {print_proj}</p>
-                <p>Kunde: {pr.get('Kunde_Name')} | Tel: {pr.get('Kunde_Telefon')}<br>Ort: {pr.get('Kunde_Adresse')}</p></div>
-                <div><p>Zement: {pr.get('Fuge_Zement')} | Silikon: {pr.get('Fuge_Silikon')}</p>{asb}</div>
+                <p>Kunde: {k_name} ({k_kontakt})<br>Ort: {k_adresse}<br>Tel: {k_telefon}</p></div>
+                <div><p>Zementfuge: {f_zem}<br>Silikonfuge: {f_sil}</p>{asb}</div>
                 <div><img src="{qr}" width="100"></div>
             </div>
             <table style="width:100%;border-collapse:collapse;"><tr><th style="border:1px solid #000;padding:10px;">Datum / Mitarbeiter / Stunden / Ausgeführte Arbeiten</th></tr>
@@ -354,10 +386,11 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
             st.download_button("📄 HTML Vorlage herunterladen", html, f"Rapport_{print_proj}.html", "text/html")
 
     with t_alchemist:
+        st.markdown("Generiert eine standardisierte Excel-Datei für die Buchhaltung.")
         df_z, _ = ds.read_csv(service, Z_FID, "Arbeitszeit_AKZ.csv")
         if not df_z.empty:
             df_z = validate_time_data(df_z)
-            status = st.selectbox("Qualitäts-Filter:", ["Nur SIGNIERT (Compliance erfüllt)", "FREIGEGEBEN & SIGNIERT", "Alle Daten (Inkl. Entwürfe)"])
+            status = st.selectbox("Qualitäts-Filter:", ["Nur SIGNIERT", "FREIGEGEBEN & SIGNIERT", "Alle Daten"])
             df_ex = df_z[df_z["Status"] == "SIGNIERT"] if "Nur" in status else df_z[df_z["Status"].isin(["FREIGEGEBEN", "SIGNIERT"])] if "FREIGEGEBEN" in status else df_z
             if not df_ex.empty:
                 df_ex['Datum'] = pd.to_datetime(df_ex['Datum'])
@@ -388,6 +421,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                     if "ep" in st.session_state: del st.session_state["ep"]
                     st.success("Projektdaten erfolgreich bereinigt."); time.sleep(2); st.rerun()
             else:
+                df_emp, fid_emp = ds.read_csv(service, P_FID, "Employees.csv")
                 tgt = st.selectbox("Mitarbeiter:", df_emp["Name"].tolist() if not df_emp.empty else [])
                 if st.button("🛑 Endgültig löschen"):
                     df_emp = df_emp[df_emp["Name"].astype(str).str.strip() != str(tgt).strip()]
@@ -398,7 +432,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                     st.success("Mitarbeiterstammdaten erfolgreich bereinigt."); time.sleep(2); st.rerun()
 
 # ==========================================
-# 7. SYSTEM-KERN (Boot-Sequenz)
+# 6. SYSTEM-KERN (Boot-Sequenz)
 # ==========================================
 def main():
     init_session_state()
@@ -418,23 +452,30 @@ def main():
     if view == "Start":
         c1, c2 = st.columns(2)
         with c1: 
-            if st.button("👷‍♂️ Personal", use_container_width=True): st.session_state["view"] = "Mitarbeiter_Login"; st.rerun()
+            if st.button("👷‍♂️ Personal-Login", use_container_width=True): st.session_state["view"] = "Mitarbeiter_Login"; st.rerun()
         with c2: 
             if st.button("🔐 Projektleitung", use_container_width=True): st.session_state["view"] = "Admin_Login"; st.rerun()
 
     elif view == "Admin_Login":
-        if st.button("⬅️ Zurück"): st.session_state["view"] = "Start"; st.rerun()
+        if st.button("⬅️ Zurück zum Menü"): st.session_state["view"] = "Start"; st.rerun()
         if st.button("Login", type="primary") if st.text_input("Admin PIN", type="password") == str(sec.get("ADMIN_PIN", "1234")) else False:
             st.session_state.update({"logged_in": True, "user_role": "Admin", "view": "Admin_Dashboard"}); st.rerun()
 
     elif view == "Mitarbeiter_Login":
-        if st.button("⬅️ Zurück"): st.session_state["view"] = "Start"; st.rerun()
+        if st.button("⬅️ Zurück zum Menü"): st.session_state["view"] = "Start"; st.rerun()
+        
         df_emp, _ = ds.read_csv(s, P_FID, "Employees.csv")
         df_emp = validate_employee_data(df_emp) 
-        emps = df_emp[df_emp["Status"] == "Aktiv"]["Name"].tolist() if not df_emp.empty else []
         
+        # ROBUSTE VALIDIERUNG: Filtert aktive Mitarbeiter und ignoriert Leerzeichen/Großschreibung
+        if not df_emp.empty:
+            active_mask = df_emp["Status"].astype(str).str.strip().str.lower() == "aktiv"
+            emps = df_emp[active_mask]["Name"].tolist()
+            emps = [name for name in emps if str(name).strip() != ""] # Leere Namen ausblenden
+        else:
+            emps = []
+            
         sel = st.selectbox("Mitarbeiter auswählen:", emps if emps else ["Leer"])
-        
         pin_eingabe = st.text_input("Persönliche PIN", type="password")
         
         if st.button("Anmelden", type="primary") and sel != "Leer":
