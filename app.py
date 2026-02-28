@@ -39,7 +39,27 @@ st.markdown(f"""
     """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. DATEN-VALIDIERUNG & SICHERHEIT
+# 2. SYSTEM-HELFER & UI-BASIS (Fehlende Funktionen wiederhergestellt)
+# ==========================================
+def init_session_state():
+    """Initialisiert den Arbeitsspeicher beim Start der App."""
+    if "logged_in" not in st.session_state: st.session_state["logged_in"] = False
+    if "user_role" not in st.session_state: st.session_state["user_role"] = ""
+    if "user_name" not in st.session_state: st.session_state["user_name"] = ""
+    if "view" not in st.session_state: st.session_state["view"] = "Start"
+
+def render_header():
+    """Baut das Logo und den Titel der App auf."""
+    col_logo, col_name = st.columns([1, 6])
+    with col_logo:
+        try: st.image("logo.png", use_container_width=True)
+        except Exception: st.markdown(f"<h1 style='margin-bottom:{SPACING_27}px;'>🏗️</h1>", unsafe_allow_html=True)
+    with col_name:
+        st.markdown("<h1 style='color:#D4AF37; margin-top:0px;'>R. Baumgartner AG</h1>", unsafe_allow_html=True)
+    st.divider()
+
+# ==========================================
+# 3. DATEN-VALIDIERUNG & SICHERHEIT
 # ==========================================
 def validate_project_data(df: pd.DataFrame) -> pd.DataFrame:
     """Stellt sicher, dass alle Projekt-Spalten im korrekten Format existieren."""
@@ -74,7 +94,7 @@ def validate_employee_data(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ==========================================
-# 3. DATEI-MANAGEMENT (Google Drive)
+# 4. DATEI-MANAGEMENT (Google Drive)
 # ==========================================
 @st.cache_data(ttl=CACHE_TTL_108, show_spinner=False)
 def load_project_files_from_drive(_service, folder_id: str, project_name: str) -> list:
@@ -112,7 +132,7 @@ def delete_drive_assets(_service, keyword: str, folders: list):
         except Exception: pass
 
 # ==========================================
-# 4. GESCHÄFTSLOGIK & RAPPORT-VERARBEITUNG
+# 5. GESCHÄFTSLOGIK & RAPPORT-VERARBEITUNG
 # ==========================================
 def process_rapport(service, f_date, f_start, f_end, f_pause_min, f_arbeit, f_mat, f_bem, sel_proj, r_hin, r_rueck, P_FID, Z_FID, user_name):
     """Berechnet Arbeits- und Reisezeiten gemäss SPV-Vorgaben."""
@@ -166,7 +186,7 @@ def save_to_drive_batch(service, rows_p, rows_z, P_FID, Z_FID):
     st.cache_data.clear()
 
 # ==========================================
-# 5. BENUTZEROBERFLÄCHEN (UI)
+# 6. BENUTZEROBERFLÄCHEN (UI)
 # ==========================================
 def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
     user_name = st.session_state['user_name']
@@ -375,7 +395,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                     st.success("Mitarbeiterstammdaten erfolgreich bereinigt."); time.sleep(2); st.rerun()
 
 # ==========================================
-# 6. SYSTEM-KERN (Boot-Sequenz)
+# 7. SYSTEM-KERN (Boot-Sequenz)
 # ==========================================
 def main():
     init_session_state()
