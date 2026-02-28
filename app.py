@@ -39,7 +39,7 @@ st.markdown(f"""
     """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. SYSTEM-HELFER & UI-BASIS (Fehlende Funktionen wiederhergestellt)
+# 2. SYSTEM-HELFER & UI-BASIS
 # ==========================================
 def init_session_state():
     """Initialisiert den Arbeitsspeicher beim Start der App."""
@@ -62,35 +62,43 @@ def render_header():
 # 3. DATEN-VALIDIERUNG & SICHERHEIT
 # ==========================================
 def validate_project_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Stellt sicher, dass alle Projekt-Spalten im korrekten Format existieren."""
     required_cols = ["Projekt_ID", "Auftragsnummer", "Projekt_Name", "Status", "Kunde_Name", "Kunde_Adresse", "Kunde_Email", "Kunde_Telefon", "Kunde_Kontakt", "Fuge_Zement", "Fuge_Silikon", "Asbest_Gefahr"]
     for col in required_cols:
         if col not in df.columns: 
-            df[col] = "Nein" if col == "Asbest_Gefahr" else ""
-    for col in required_cols:
-        df[col] = df[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''}).str.strip()
+            df[col] = ""
+            
+    if not df.empty:
+        for col in required_cols:
+            df[col] = df[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''}).str.strip()
+        df.loc[df['Asbest_Gefahr'] == '', 'Asbest_Gefahr'] = 'Nein'
     return df
 
 def validate_time_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Stellt sicher, dass alle AZK-Spalten im korrekten Format existieren."""
     required_cols = ["Start", "Ende", "Pause_Min", "R_Wohn_Bau_Min", "R_Bau_Wohn_Min", "Reisezeit_bezahlt_Min", "Arbeitszeit_inkl_Reisezeit", "Absenz_Typ", "Status"]
     for col in required_cols:
         if col not in df.columns:
-            df[col] = 0 if "Min" in col or "Arbeitszeit" in col else ("" if col == "Absenz_Typ" or col in ["Start", "Ende"] else "ENTWURF")
+            df[col] = ""
+            
+    if not df.empty:
+        df.loc[df['Status'] == '', 'Status'] = 'ENTWURF'
     return df
 
 def validate_employee_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Sichert die Personal-Stammdaten inkl. PIN-Schutz."""
-    if df.empty or "Mitarbeiter_ID" not in df.columns:
-        df = pd.DataFrame({"Mitarbeiter_ID": ["M01"], "Name": ["Christoph Schlorff"], "PIN": ["1234"], "Status": ["Aktiv"]})
+    """Sichert die Personal-Stammdaten (Ohne Geister-Einträge zu erzeugen)."""
+    required_cols = ["Mitarbeiter_ID", "Name", "PIN", "Status"]
     
-    if "PIN" not in df.columns:
-        df["PIN"] = "1234"
+    # Sicherstellen, dass alle Spalten existieren
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = ""
+            
+    # Formatierung anwenden, falls Daten vorhanden sind
+    if not df.empty:
+        for col in required_cols:
+            df[col] = df[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''}).str.strip()
+        # Leere PINs erhalten Standardwert 1234
+        df.loc[df['PIN'] == '', 'PIN'] = '1234'
         
-    for col in df.columns:
-        df[col] = df[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''}).str.strip()
-        
-    df.loc[df['PIN'] == '', 'PIN'] = '1234'
     return df
 
 # ==========================================
@@ -98,7 +106,6 @@ def validate_employee_data(df: pd.DataFrame) -> pd.DataFrame:
 # ==========================================
 @st.cache_data(ttl=CACHE_TTL_108, show_spinner=False)
 def load_project_files_from_drive(_service, folder_id: str, project_name: str) -> list:
-    """Lädt Dateien effizient aus Google Drive."""
     if not folder_id: return []
     try:
         query = f"'{folder_id}' in parents and trashed = false"
@@ -109,7 +116,6 @@ def load_project_files_from_drive(_service, folder_id: str, project_name: str) -
 
 @st.cache_data(ttl=CACHE_TTL_108 * 10, show_spinner=False)
 def download_file_bytes(_service, file_id: str):
-    """Lädt die Bytes einer Datei für die Anzeige herunter."""
     try:
         request = _service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
@@ -121,7 +127,6 @@ def download_file_bytes(_service, file_id: str):
         return None
 
 def delete_drive_assets(_service, keyword: str, folders: list):
-    """Löscht Dateien unwiderruflich aus dem verknüpften Ordner."""
     for fid in folders:
         if not fid: continue
         try:
@@ -135,7 +140,6 @@ def delete_drive_assets(_service, keyword: str, folders: list):
 # 5. GESCHÄFTSLOGIK & RAPPORT-VERARBEITUNG
 # ==========================================
 def process_rapport(service, f_date, f_start, f_end, f_pause_min, f_arbeit, f_mat, f_bem, sel_proj, r_hin, r_rueck, P_FID, Z_FID, user_name):
-    """Berechnet Arbeits- und Reisezeiten gemäss SPV-Vorgaben."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     date_str = f_date.strftime("%Y-%m-%d")
     
@@ -158,7 +162,6 @@ def process_rapport(service, f_date, f_start, f_end, f_pause_min, f_arbeit, f_ma
     st.success(f"Rapport gespeichert. Netto-Arbeit: {work_hours}h | Reise bezahlt: {reise_min_bezahlt} Min | AZK Total: {total_inkl_reise}h")
 
 def process_absence_batch(service, start_date, end_date, f_hours, a_typ, f_bem, sel_proj, P_FID, Z_FID, user_name):
-    """Verarbeitet mehrtägige Absenzen in einem Durchgang."""
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     days_diff = (end_date - start_date).days + 1
     
