@@ -191,7 +191,7 @@ def save_to_drive(service, row_p, row_z, P_FID, Z_FID):
     ds.save_csv(service, P_FID, "Baustellen_Rapport.csv", pd.concat([df_p, pd.DataFrame([row_p])], ignore_index=True), fid_p)
     df_z, fid_z = ds.read_csv(service, Z_FID, "Arbeitszeit_AKZ.csv")
     ds.save_csv(service, Z_FID, "Arbeitszeit_AKZ.csv", pd.concat([validate_time_data(df_z), pd.DataFrame([row_z])], ignore_index=True), fid_z)
-    st.cache_data.clear() # Harter Cache Reset für sofortige Synchronisation
+    st.cache_data.clear() 
 
 def save_to_drive_batch(service, rows_p, rows_z, P_FID, Z_FID):
     df_p, fid_p = ds.read_csv(service, P_FID, "Baustellen_Rapport.csv")
@@ -221,7 +221,6 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
         
     sel_proj = st.selectbox("Aktuelles Projekt auswählen:", active_projs if active_projs else ["Keine aktiven Projekte gefunden"])
     
-    # KLARE, FESTE PROJEKTINFOS (Nicht mehr versteckt)
     if sel_proj != "Keine aktiven Projekte gefunden":
         matching_proj = df_proj[df_proj["Projekt_Name"] == sel_proj]
         if not matching_proj.empty:
@@ -292,9 +291,7 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
         
         if not df_hp.empty and not df_hz.empty and "Erfasst" in df_hz.columns:
             df_hz = validate_time_data(df_hz)
-            # Führt Tätigkeiten und Stunden anhand der Erfassungs-ID zusammen
             df_merged = pd.merge(df_hp, df_hz[["Erfasst", "Arbeitszeit_inkl_Reisezeit"]], on="Erfasst", how="left")
-            # Zeigt ALLE Mitarbeiter für dieses Projekt an
             hist = df_merged[df_merged["Projekt"] == sel_proj].sort_values(by="Datum", ascending=False)
             
             if not hist.empty:
@@ -329,7 +326,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     emp_list = [name for name in df_emp["Name"].tolist() if str(name).strip() != ""] if not df_emp.empty else ["Keine Mitarbeiter"]
 
     # -----------------------------
-    # 7.1 WOCHENABSCHLUSS (Workflow)
+    # 7.1 WOCHENABSCHLUSS (Mit manueller Dropdown-Kontrolle)
     # -----------------------------
     with t_week:
         sel_emp = st.selectbox("Mitarbeiter auswählen:", emp_list, key="wa_emp")
@@ -343,9 +340,16 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                 df_emp_z['Sort'] = df_emp_z['Status'].map({ST_OFFEN: 1, ST_DRUCK: 2, ST_FINAL: 3}).fillna(4)
                 df_emp_z = df_emp_z.sort_values(by=['Sort', 'Datum']).drop(columns=['Sort'])
                 
-                edit_z = st.data_editor(df_emp_z, num_rows="dynamic", use_container_width=True, key=f"ed_wa_{sel_emp}")
+                # DIE LÖSUNG FÜR DEN USER: Dropdown für den Status direkt in der Tabelle!
+                wa_config = {
+                    "Status": st.column_config.SelectboxColumn("Status", options=[ST_OFFEN, ST_DRUCK, ST_FINAL], required=True)
+                }
                 
-                col_a, col_b = st.columns(2)
+                edit_z = st.data_editor(df_emp_z, num_rows="dynamic", use_container_width=True, column_config=wa_config, key=f"ed_wa_{sel_emp}")
+                
+                st.divider()
+                col_a, col_b, col_c = st.columns(3)
+                
                 with col_a:
                     if st.button("💾 Tabelle speichern", use_container_width=True):
                         df_z.set_index('Erfasst', inplace=True)
@@ -357,6 +361,56 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                         st.cache_data.clear()
                         st.success("Tabelle aktualisiert.")
                         time.sleep(1); st.rerun()
+                        
+                    if st.button("🔒 Für Druck freigeben (Alle)", use_container_width=True):
+                        mask = (df_z["Mitarbeiter"] == sel_emp) & (df_z["Status"] == ST_OFFEN)
+                        df_z.loc[mask, "Status"] = ST_DRUCK
+                        ds.save_csv(service, Z_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
+                        st.cache_data.clear()
+                        st.success("Zeiten gesperrt."); time.sleep(1); st.rerun()
+
+                with col_b:
+                    print_mask = (edit_z["Status"] == ST_DRUCK)
+                    if not edit_z[print_mask].empty:
+                        html_rows = ""
+                        total_h = 0
+                        for _, r in edit_z[print_mask].iterrows():
+                            h = float(r.get('Arbeitszeit_inkl_Reisezeit', 0))
+                            total_h += h
+                            html_rows += f"<tr><td style='border:1px solid #aaaaaa; padding:8px;'>{r['Datum']}</td><td style='border:1px solid #aaaaaa; padding:8px;'><b>{r['Projekt']}</b></td><td style='border:1px solid #aaaaaa; padding:8px; text-align:center;'>{h}</td></tr>"
+                        
+                        html = f"""<html><body style="font-family:Arial;font-size:12px;background:#fff;color:#000;">
+                        <h1 style="margin:0;font-size:22px;border-bottom:2px solid #000;padding-bottom:10px;">Wochenbericht / Arbeitszeit</h1>
+                        <p style="font-size:14px;margin-top:10px;"><b>Mitarbeiter:</b> {sel_emp}</p>
+                        <table style="width:100%; border-collapse:collapse; margin-top:20px;">
+                            <tr>
+                                <th style="border:1px solid #aaaaaa; padding:10px; width:20%; text-align:left; background-color:#f9f9f9;">Datum</th>
+                                <th style="border:1px solid #aaaaaa; padding:10px; width:60%; text-align:left; background-color:#f9f9f9;">Projekt / Einsatzort</th>
+                                <th style="border:1px solid #aaaaaa; padding:10px; width:20%; text-align:center; background-color:#f9f9f9;">Stunden Total</th>
+                            </tr>
+                            {html_rows}
+                            <tr>
+                                <td colspan="2" style="border:1px solid #aaaaaa; padding:10px; text-align:right;"><b>Gesamtsumme:</b></td>
+                                <td style="border:1px solid #aaaaaa; padding:10px; text-align:center;"><b>{round(total_h, 2)} Std.</b></td>
+                            </tr>
+                        </table>
+                        <div style="margin-top:54px; display:flex; justify-content:space-between;">
+                            <div style="border-top:1px solid #000; width:45%; padding-top:10px;">Visum Administration</div>
+                            <div style="border-top:1px solid #000; width:45%; padding-top:10px;">Unterschrift Mitarbeiter</div>
+                        </div>
+                        </body></html>"""
+                        
+                        st.download_button("🖨️ Wochenbericht drucken", html, f"Wochenbericht_{sel_emp.replace(' ','_')}.html", "text/html", use_container_width=True)
+                    else:
+                        st.button("🖨️ (Keine druckbereiten Daten)", disabled=True, use_container_width=True)
+
+                with col_c:
+                    if st.button("✅ In AZK buchen (Final)", type="primary", use_container_width=True):
+                        mask = (df_z["Mitarbeiter"] == sel_emp) & (df_z["Status"] == ST_DRUCK)
+                        df_z.loc[mask, "Status"] = ST_FINAL
+                        ds.save_csv(service, Z_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
+                        st.cache_data.clear()
+                        st.success("Erfolgreich ins finale Archiv übertragen!"); time.sleep(1); st.rerun()
 
     # -----------------------------
     # 7.2 PROJEKT-CONTROLLING
@@ -365,7 +419,11 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
         st.markdown("**Projekt-Rapporte (Tätigkeiten & Material)**")
         df_hp, fid_hp = ds.read_csv(service, P_FID, "Baustellen_Rapport.csv")
         if not df_hp.empty:
-            edit_hp = st.data_editor(df_hp, num_rows="dynamic", use_container_width=True, key="ed_hp")
+            # Auch hier: Status Dropdown für direkte Kontrolle
+            hp_config = {
+                "Status": st.column_config.SelectboxColumn("Status", options=[ST_OFFEN, ST_DRUCK, ST_FINAL], required=True)
+            }
+            edit_hp = st.data_editor(df_hp, num_rows="dynamic", use_container_width=True, column_config=hp_config, key="ed_hp")
             if st.button("💾 Projekt-Rapporte aktualisieren"):
                 ds.save_csv(service, P_FID, "Baustellen_Rapport.csv", edit_hp, fid_hp)
                 st.cache_data.clear(); st.success("Rapporte erfolgreich aktualisiert.")
@@ -406,6 +464,18 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
             if st.button("Fotos hochladen") and foto_f and ap != "Keine Projekte gefunden":
                 for f in foto_f: ds.upload_image(service, FOTO_FID, f"{ap}_ADMIN_{f.name}", io.BytesIO(f.getvalue()), f.type)
                 st.success("Upload erfolgreich."); st.cache_data.clear(); time.sleep(1); st.rerun()
+        
+        st.divider()
+        if st.button("🔄 Datei-Verzeichnis aktualisieren"): st.cache_data.clear()
+        if ap != "Keine Projekte gefunden":
+            files = load_project_files_from_drive(service, FOTO_FID, ap) + load_project_files_from_drive(service, PLAN_FID, ap)
+            cols = st.columns(4)
+            for i, img in enumerate(files):
+                with cols[i % 4]:
+                    b = download_file_bytes(service, img['id'])
+                    if b:
+                        if img['name'].lower().endswith(('.png','.jpg','.jpeg')): st.image(b)
+                        else: st.download_button(f"📥 {img['name'][:15]}", b, img['name'])
 
     # -----------------------------
     # 7.5 DRUCKEN (IMMER VERFÜGBAR - 3 SPALTEN)
@@ -429,7 +499,6 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
 
             qr = f"https://api.qrserver.com/v1/create-qr-code/?size=150x150&data={urllib.parse.quote(f'{BASE_URL}?projekt={urllib.parse.quote(print_proj)}')}"
             
-            # Die geforderten 3 Spalten mit 15 Leerzeilen
             html_rows = "".join(["<tr><td style='border:1px solid #aaaaaa; height:45px;'></td><td style='border:1px solid #aaaaaa; height:45px;'></td><td style='border:1px solid #aaaaaa; height:45px;'></td></tr>" for _ in range(15)])
             
             html = f"""<html><body style="font-family:Arial;font-size:12px;background:#fff;color:#000;">
