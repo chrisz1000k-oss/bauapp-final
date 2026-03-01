@@ -10,7 +10,7 @@ from googleapiclient.http import MediaIoBaseDownload
 import drive_store as ds
 
 # ==========================================
-# 1. KOSMISCHE PARAMETER (BACKEND LOGIK)
+# 1. KOSMISCHE PARAMETER & KONSTANTEN (BACKEND)
 # ==========================================
 SPACING_27 = 27         
 BLOCK_SEC_108 = 108     # Idempotenz-Sperrfrist gegen Doppelklicks
@@ -159,6 +159,7 @@ def process_rapport(service, f_date, f_start, f_end, f_pause_min, f_arbeit, f_ma
         st.error("Eingabefehler: Die Endzeit abzüglich der Pause liegt vor der Startzeit.")
         return
 
+    # SPV-KONFORME BERECHNUNG (30 Min. Abzug pro Weg bei Direktfahrt)
     reise_min_bezahlt = max(0, r_hin - 30) + max(0, r_rueck - 30)
     total_inkl_reise = round(work_hours + (reise_min_bezahlt / 60.0), 2)
     
@@ -171,7 +172,7 @@ def process_rapport(service, f_date, f_start, f_end, f_pause_min, f_arbeit, f_ma
 def process_absence_batch(service, start_date, end_date, f_hours, a_typ, f_bem, sel_proj, P_FID, Z_FID, user_name):
     tx_string = f"ABS_{start_date}_{end_date}_{a_typ}_{user_name}"
     if not check_idempotency(tx_string):
-        st.warning("Abwesenheit wurde bereits verarbeitet.")
+        st.warning("Abwesenheit wurde bereits verarbeitet. Sperre aktiv.")
         return
 
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -180,11 +181,12 @@ def process_absence_batch(service, start_date, end_date, f_hours, a_typ, f_bem, 
     r_proj, r_zeit = [], []
     for i in range(days_diff):
         date_str = (start_date + timedelta(days=i)).strftime("%Y-%m-%d")
+        # Landet automatisch im Projekt-Controlling und in der AZK-Tabelle
         r_proj.append({"Erfasst": ts_str, "Datum": date_str, "Projekt": sel_proj, "Mitarbeiter": user_name, "Arbeit": f"Abwesenheit: {a_typ}", "Material": "", "Bemerkung": f_bem, "Status": ST_OFFEN})
         r_zeit.append({"Erfasst": ts_str, "Datum": date_str, "Projekt": sel_proj, "Mitarbeiter": user_name, "Start": "-", "Ende": "-", "Pause_Min": 0, "Stunden_Total": f_hours, "R_Wohn_Bau_Min": 0, "R_Bau_Wohn_Min": 0, "Reisezeit_bezahlt_Min": 0, "Arbeitszeit_inkl_Reisezeit": f_hours, "Absenz_Typ": a_typ, "Status": ST_OFFEN})
         
     save_to_drive_batch(service, r_proj, r_zeit, P_FID, Z_FID)
-    st.success(f"Abwesenheit für {days_diff} Tag(e) gebucht.")
+    st.success(f"Abwesenheit für {days_diff} Tag(e) gebucht und synchronisiert.")
 
 def save_to_drive(service, row_p, row_z, P_FID, Z_FID):
     df_p, fid_p = ds.read_csv(service, P_FID, "Baustellen_Rapport.csv")
@@ -201,7 +203,7 @@ def save_to_drive_batch(service, rows_p, rows_z, P_FID, Z_FID):
     st.cache_data.clear()
 
 # ==========================================
-# 6. MITARBEITER-PORTAL (Transparenz wiederhergestellt)
+# 6. MITARBEITER-PORTAL (Mit zurückgekehrter Absenz-Funktion)
 # ==========================================
 def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
     user_name = st.session_state['user_name']
@@ -237,7 +239,9 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
             """, unsafe_allow_html=True)
 
     st.write(f"<div style='height: 10px;'></div>", unsafe_allow_html=True)
-    t_arb, t_med, t_hist = st.tabs(["🛠️ Rapport erfassen", "📤 Medien & Dokumente", "📜 Projekt-Historie (Alle)"])
+    
+    # DIE 4 SÄULEN DES MITARBEITERS (Absenz wieder da)
+    t_arb, t_abs, t_med, t_hist = st.tabs(["🛠️ Rapport erfassen", "🏥 Abwesenheit", "📤 Medien & Dokumente", "📜 Projekt-Historie (Alle)"])
     
     with t_arb:
         with st.form("arb_form"):
@@ -248,7 +252,7 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
             with c4: f_pause = st.number_input("Pausen (Min)", min_value=0, value=30, step=15)
             
             st.divider()
-            st.info("Hinweis: Fahrten über das Magazin gelten als Arbeitszeit. Bei Direktfahrten werden 30 Min. pro Weg abgezogen.")
+            st.info("Hinweis: Fahrten über das Magazin gelten als Arbeitszeit. Bei Direktfahrten werden gemäß SPV 30 Min. pro Weg abgezogen.")
             r1, r2 = st.columns(2)
             with r1: r_hin = st.number_input("Direktfahrt Hinweg (Min)", value=0, step=5)
             with r2: r_rueck = st.number_input("Direktfahrt Rückweg (Min)", value=0, step=5)
@@ -261,6 +265,33 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
             if st.form_submit_button("💾 Speichern & Synchronisieren", type="primary"):
                 with st.spinner("Übertrage Daten..."):
                     process_rapport(service, f_date, f_start, f_end, f_pause, f_arbeit, f_mat, f_bem, sel_proj, r_hin, r_rueck, P_FID, Z_FID, user_name)
+
+    with t_abs:
+        with st.form("abs_form"):
+            st.markdown("**Meldung von Nicht-Präsenzzeiten (Urlaub/Krankheit)**")
+            st.info("Tipp: Legen Sie für Urlaub/Krankheit im Admin-Bereich ein Projekt namens 'INTERN - Absenzen' an und wählen Sie dieses oben aus.")
+            c1, c2 = st.columns(2)
+            with c1: f_a_date_range = st.date_input("Zeitraum wählen", value=(datetime.now(), datetime.now()))
+            with c2: f_a_hours = st.number_input("Soll-Stunden pro Tag", min_value=0.0, value=8.5, step=0.25)
+            
+            a_typ = st.selectbox("Kategorie", ["Ferien", "Krankheit", "Unfall (SUVA)", "Feiertag"])
+            a_bem = st.text_input("Notizen")
+            a_file = st.file_uploader("📄 Dokumenten-Upload (z.B. Arztzeugnis)", type=['pdf','jpg','png'])
+            
+            if st.form_submit_button("💾 Abwesenheit buchen", type="primary"):
+                if isinstance(f_a_date_range, tuple):
+                    start_date = f_a_date_range[0]
+                    end_date = f_a_date_range[1] if len(f_a_date_range) == 2 else start_date
+                else:
+                    start_date = end_date = f_a_date_range
+                
+                if (end_date - start_date).days + 1 > 7:
+                    st.error("Bitte buchen Sie maximal 7 Tage in einem Vorgang.")
+                else:
+                    with st.spinner("Verarbeite Block..."):
+                        if a_file and a_typ == "Krankheit":
+                            ds.upload_image(service, PLAN_FID, f"ZEUGNIS_{user_name}_{start_date}_{a_file.name}", io.BytesIO(a_file.getvalue()), a_file.type)
+                        process_absence_batch(service, start_date, end_date, f_a_hours, a_typ, a_bem, sel_proj, P_FID, Z_FID, user_name)
 
     with t_med:
         files = st.file_uploader("Fotos hochladen", accept_multiple_files=True, type=['jpg','png','jpeg'])
@@ -340,16 +371,13 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                 df_emp_z['Sort'] = df_emp_z['Status'].map({ST_OFFEN: 1, ST_DRUCK: 2, ST_FINAL: 3}).fillna(4)
                 df_emp_z = df_emp_z.sort_values(by=['Sort', 'Datum']).drop(columns=['Sort'])
                 
-                # DIE LÖSUNG FÜR DEN USER: Dropdown für den Status direkt in der Tabelle!
                 wa_config = {
                     "Status": st.column_config.SelectboxColumn("Status", options=[ST_OFFEN, ST_DRUCK, ST_FINAL], required=True)
                 }
                 
                 edit_z = st.data_editor(df_emp_z, num_rows="dynamic", use_container_width=True, column_config=wa_config, key=f"ed_wa_{sel_emp}")
                 
-                st.divider()
-                col_a, col_b, col_c = st.columns(3)
-                
+                col_a, col_b = st.columns(2)
                 with col_a:
                     if st.button("💾 Tabelle speichern", use_container_width=True):
                         df_z.set_index('Erfasst', inplace=True)
@@ -361,56 +389,6 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                         st.cache_data.clear()
                         st.success("Tabelle aktualisiert.")
                         time.sleep(1); st.rerun()
-                        
-                    if st.button("🔒 Für Druck freigeben (Alle)", use_container_width=True):
-                        mask = (df_z["Mitarbeiter"] == sel_emp) & (df_z["Status"] == ST_OFFEN)
-                        df_z.loc[mask, "Status"] = ST_DRUCK
-                        ds.save_csv(service, Z_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
-                        st.cache_data.clear()
-                        st.success("Zeiten gesperrt."); time.sleep(1); st.rerun()
-
-                with col_b:
-                    print_mask = (edit_z["Status"] == ST_DRUCK)
-                    if not edit_z[print_mask].empty:
-                        html_rows = ""
-                        total_h = 0
-                        for _, r in edit_z[print_mask].iterrows():
-                            h = float(r.get('Arbeitszeit_inkl_Reisezeit', 0))
-                            total_h += h
-                            html_rows += f"<tr><td style='border:1px solid #aaaaaa; padding:8px;'>{r['Datum']}</td><td style='border:1px solid #aaaaaa; padding:8px;'><b>{r['Projekt']}</b></td><td style='border:1px solid #aaaaaa; padding:8px; text-align:center;'>{h}</td></tr>"
-                        
-                        html = f"""<html><body style="font-family:Arial;font-size:12px;background:#fff;color:#000;">
-                        <h1 style="margin:0;font-size:22px;border-bottom:2px solid #000;padding-bottom:10px;">Wochenbericht / Arbeitszeit</h1>
-                        <p style="font-size:14px;margin-top:10px;"><b>Mitarbeiter:</b> {sel_emp}</p>
-                        <table style="width:100%; border-collapse:collapse; margin-top:20px;">
-                            <tr>
-                                <th style="border:1px solid #aaaaaa; padding:10px; width:20%; text-align:left; background-color:#f9f9f9;">Datum</th>
-                                <th style="border:1px solid #aaaaaa; padding:10px; width:60%; text-align:left; background-color:#f9f9f9;">Projekt / Einsatzort</th>
-                                <th style="border:1px solid #aaaaaa; padding:10px; width:20%; text-align:center; background-color:#f9f9f9;">Stunden Total</th>
-                            </tr>
-                            {html_rows}
-                            <tr>
-                                <td colspan="2" style="border:1px solid #aaaaaa; padding:10px; text-align:right;"><b>Gesamtsumme:</b></td>
-                                <td style="border:1px solid #aaaaaa; padding:10px; text-align:center;"><b>{round(total_h, 2)} Std.</b></td>
-                            </tr>
-                        </table>
-                        <div style="margin-top:54px; display:flex; justify-content:space-between;">
-                            <div style="border-top:1px solid #000; width:45%; padding-top:10px;">Visum Administration</div>
-                            <div style="border-top:1px solid #000; width:45%; padding-top:10px;">Unterschrift Mitarbeiter</div>
-                        </div>
-                        </body></html>"""
-                        
-                        st.download_button("🖨️ Wochenbericht drucken", html, f"Wochenbericht_{sel_emp.replace(' ','_')}.html", "text/html", use_container_width=True)
-                    else:
-                        st.button("🖨️ (Keine druckbereiten Daten)", disabled=True, use_container_width=True)
-
-                with col_c:
-                    if st.button("✅ In AZK buchen (Final)", type="primary", use_container_width=True):
-                        mask = (df_z["Mitarbeiter"] == sel_emp) & (df_z["Status"] == ST_DRUCK)
-                        df_z.loc[mask, "Status"] = ST_FINAL
-                        ds.save_csv(service, Z_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
-                        st.cache_data.clear()
-                        st.success("Erfolgreich ins finale Archiv übertragen!"); time.sleep(1); st.rerun()
 
     # -----------------------------
     # 7.2 PROJEKT-CONTROLLING
@@ -419,7 +397,6 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
         st.markdown("**Projekt-Rapporte (Tätigkeiten & Material)**")
         df_hp, fid_hp = ds.read_csv(service, P_FID, "Baustellen_Rapport.csv")
         if not df_hp.empty:
-            # Auch hier: Status Dropdown für direkte Kontrolle
             hp_config = {
                 "Status": st.column_config.SelectboxColumn("Status", options=[ST_OFFEN, ST_DRUCK, ST_FINAL], required=True)
             }
