@@ -77,19 +77,14 @@ def render_header():
 # 3. DATEN-VALIDIERUNG & INTEGRITÄT
 # ==========================================
 def validate_project_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Die Auto-Aktiv-Garantie für fehlerfreie Projekt-Sichtbarkeit."""
     required_cols = ["Projekt_ID", "Auftragsnummer", "Projekt_Name", "Status", "Kunde_Name", "Kunde_Adresse", "Kunde_Email", "Kunde_Telefon", "Kunde_Kontakt", "Fuge_Zement", "Fuge_Silikon", "Asbest_Gefahr"]
     for col in required_cols:
         if col not in df.columns: df[col] = ""
-        
     if not df.empty:
         for col in required_cols:
             df[col] = df[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''}).str.strip()
         df.loc[df['Asbest_Gefahr'] == '', 'Asbest_Gefahr'] = 'Nein'
-        
-        # Prithvi-Sicherung: Wenn der Status nicht explizit Pausiert oder Archiviert ist, ist er IMMER Aktiv
         df['Status'] = df['Status'].apply(lambda x: "Aktiv" if str(x).lower() not in ["pausiert", "archiviert"] else str(x).capitalize())
-        
     return df
 
 def validate_time_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -185,13 +180,12 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
     user_name = st.session_state['user_name']
     col_back, col_title = st.columns([1, 4])
     with col_back:
-        if st.button("🚪 Abmelden"): st.session_state["user_name"] = ""; st.session_state["view"] = "Start"; st.rerun()
+        if st.button("Abmelden"): st.session_state["user_name"] = ""; st.session_state["view"] = "Start"; st.rerun()
     with col_title: st.subheader(f"📋 Personal-Portal: {user_name}")
     
     df_proj, _ = ds.read_csv(service, P_FID, "Projects.csv")
     df_proj = validate_project_data(df_proj)
     
-    # Robuster Filter: Ignoriert dank Auto-Aktiv-Garantie keine Projekte mehr
     active_projs = []
     if not df_proj.empty:
         active_mask = df_proj["Status"].astype(str).str.strip().str.lower() == "aktiv"
@@ -269,7 +263,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     col1, col2 = st.columns([4, 1])
     with col1: st.subheader("🛠️ Projektleitung & Administration")
     with col2:
-        if st.button("🚪 Abmelden", use_container_width=True): st.session_state["logged_in"] = False; st.session_state["view"] = "Start"; st.rerun()
+        if st.button("Abmelden", use_container_width=True): st.session_state["logged_in"] = False; st.session_state["view"] = "Start"; st.rerun()
     
     t_week, t_ctrl, t_stam, t_docs, t_shiva = st.tabs(["🗓️ Wochenabschluss (Workflow)", "📊 Projekt-Controlling", "⚙️ Stammdaten", "📂 Dateien", "🗑️ System"])
     
@@ -284,7 +278,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     emp_list = [name for name in df_emp["Name"].tolist() if str(name).strip() != ""] if not df_emp.empty else ["Keine Mitarbeiter"]
 
     # -----------------------------
-    # 7.1 WOCHENABSCHLUSS (4-Stufen Workflow)
+    # 7.1 WOCHENABSCHLUSS
     # -----------------------------
     with t_week:
         st.markdown("**Automatisierter Freigabe- und Druckprozess**")
@@ -386,7 +380,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                 st.success("Rapporte erfolgreich aktualisiert.")
 
     # -----------------------------
-    # 7.3 STAMMDATEN (MIT DROPDOWNS)
+    # 7.3 STAMMDATEN
     # -----------------------------
     with t_stam:
         st.markdown("**Projekt-Verwaltung**")
