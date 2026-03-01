@@ -77,14 +77,19 @@ def render_header():
 # 3. DATEN-VALIDIERUNG & INTEGRITÄT
 # ==========================================
 def validate_project_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Die Auto-Aktiv-Garantie für fehlerfreie Projekt-Sichtbarkeit."""
     required_cols = ["Projekt_ID", "Auftragsnummer", "Projekt_Name", "Status", "Kunde_Name", "Kunde_Adresse", "Kunde_Email", "Kunde_Telefon", "Kunde_Kontakt", "Fuge_Zement", "Fuge_Silikon", "Asbest_Gefahr"]
     for col in required_cols:
         if col not in df.columns: df[col] = ""
+        
     if not df.empty:
         for col in required_cols:
             df[col] = df[col].astype(str).replace({'nan': '', 'None': '', 'NaN': ''}).str.strip()
         df.loc[df['Asbest_Gefahr'] == '', 'Asbest_Gefahr'] = 'Nein'
-        df.loc[df['Status'] == '', 'Status'] = 'Aktiv'
+        
+        # Prithvi-Sicherung: Wenn der Status nicht explizit Pausiert oder Archiviert ist, ist er IMMER Aktiv
+        df['Status'] = df['Status'].apply(lambda x: "Aktiv" if str(x).lower() not in ["pausiert", "archiviert"] else str(x).capitalize())
+        
     return df
 
 def validate_time_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -186,24 +191,28 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
     df_proj, _ = ds.read_csv(service, P_FID, "Projects.csv")
     df_proj = validate_project_data(df_proj)
     
-    active_projs = df_proj[df_proj["Status"].astype(str).str.strip().str.lower() == "aktiv"]["Projekt_Name"].tolist() if not df_proj.empty else []
-    active_projs = [p for p in active_projs if str(p).strip() != ""]
+    # Robuster Filter: Ignoriert dank Auto-Aktiv-Garantie keine Projekte mehr
+    active_projs = []
+    if not df_proj.empty:
+        active_mask = df_proj["Status"].astype(str).str.strip().str.lower() == "aktiv"
+        active_projs = df_proj[active_mask]["Projekt_Name"].tolist()
+        active_projs = [p for p in active_projs if str(p).strip() != ""]
         
-    sel_proj = st.selectbox("Aktuelles Projekt auswählen:", active_projs if active_projs else ["Keine aktiven Projekte"])
+    sel_proj = st.selectbox("Aktuelles Projekt auswählen:", active_projs if active_projs else ["Keine aktiven Projekte gefunden"])
     
-    if sel_proj != "Keine aktiven Projekte":
+    if sel_proj != "Keine aktiven Projekte gefunden":
         matching_proj = df_proj[df_proj["Projekt_Name"] == sel_proj]
         if not matching_proj.empty:
             proj_data = matching_proj.iloc[0]
-            with st.expander("ℹ️ Projekt-Informationen", expanded=False):
+            with st.expander("ℹ️ Projekt-Informationen & Vorgaben", expanded=False):
                 c_info, m_info = st.columns(2)
                 with c_info:
-                    st.write(f"**Kunde:** {proj_data.get('Kunde_Name')} ({proj_data.get('Kunde_Kontakt')})")
-                    st.write(f"**Ort:** {proj_data.get('Kunde_Adresse')}")
+                    st.write(f"**Kunde:** {proj_data.get('Kunde_Name', '-')} ({proj_data.get('Kunde_Kontakt', '-')})")
+                    st.write(f"**Ort:** {proj_data.get('Kunde_Adresse', '-')}")
                 with m_info:
-                    st.write(f"**Fugen:** Zement: {proj_data.get('Fuge_Zement')} | Silikon: {proj_data.get('Fuge_Silikon')}")
-                    if str(proj_data.get('Asbest_Gefahr')).strip().lower() == "ja": 
-                        st.markdown("<p style='color:#ff4b4b; font-weight:bold;'>⚠️ ASBEST VORHANDEN</p>", unsafe_allow_html=True)
+                    st.write(f"**Fugen:** Zement: {proj_data.get('Fuge_Zement', '-')} | Silikon: {proj_data.get('Fuge_Silikon', '-')}")
+                    if str(proj_data.get('Asbest_Gefahr', 'Nein')).strip().lower() == "ja": 
+                        st.markdown("<p style='color:#ff4b4b; font-weight:bold;'>⚠️ SICHERHEITSHINWEIS: ASBEST VORHANDEN</p>", unsafe_allow_html=True)
 
     st.write(f"<div style='height: {SPACING_27}px;'></div>", unsafe_allow_html=True)
     t_arb, t_med = st.tabs(["🛠️ Arbeitszeit erfassen", "📤 Dokumente & Pläne"])
@@ -242,18 +251,19 @@ def render_mitarbeiter_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID):
             
         st.divider()
         if st.button("🔄 Galerie laden"): st.cache_data.clear()
-        all_files = load_project_files_from_drive(service, FOTO_FID, sel_proj) + load_project_files_from_drive(service, PLAN_FID, sel_proj)
-        if all_files:
-            cols = st.columns(2)
-            for idx, img in enumerate(all_files):
-                with cols[idx % 2]:
-                    img_b = download_file_bytes(service, img['id'])
-                    if img_b:
-                        if img['name'].lower().endswith(('.png', '.jpg', '.jpeg')): st.image(img_b, use_container_width=True)
-                        else: st.download_button(f"📥 {img['name'][:15]}", data=img_b, file_name=img['name'])
+        if sel_proj != "Keine aktiven Projekte gefunden":
+            all_files = load_project_files_from_drive(service, FOTO_FID, sel_proj) + load_project_files_from_drive(service, PLAN_FID, sel_proj)
+            if all_files:
+                cols = st.columns(2)
+                for idx, img in enumerate(all_files):
+                    with cols[idx % 2]:
+                        img_b = download_file_bytes(service, img['id'])
+                        if img_b:
+                            if img['name'].lower().endswith(('.png', '.jpg', '.jpeg')): st.image(img_b, use_container_width=True)
+                            else: st.download_button(f"📥 {img['name'][:15]}", data=img_b, file_name=img['name'])
 
 # ==========================================
-# 7. ADMIN DASHBOARD (Das Architektur-Update)
+# 7. ADMIN DASHBOARD
 # ==========================================
 def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     col1, col2 = st.columns([4, 1])
@@ -261,7 +271,6 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     with col2:
         if st.button("🚪 Abmelden", use_container_width=True): st.session_state["logged_in"] = False; st.session_state["view"] = "Start"; st.rerun()
     
-    # Neue, prozessoptimierte Struktur
     t_week, t_ctrl, t_stam, t_docs, t_shiva = st.tabs(["🗓️ Wochenabschluss (Workflow)", "📊 Projekt-Controlling", "⚙️ Stammdaten", "📂 Dateien", "🗑️ System"])
     
     df_proj, fid_proj = ds.read_csv(service, P_FID, "Projects.csv")
@@ -275,11 +284,11 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
     emp_list = [name for name in df_emp["Name"].tolist() if str(name).strip() != ""] if not df_emp.empty else ["Keine Mitarbeiter"]
 
     # -----------------------------
-    # 7.1 WOCHENABSCHLUSS (Der neue Jala-Flow)
+    # 7.1 WOCHENABSCHLUSS (4-Stufen Workflow)
     # -----------------------------
     with t_week:
         st.markdown("**Automatisierter Freigabe- und Druckprozess**")
-        st.info("Bearbeiten Sie hier die Zeiten. Sperren Sie sie für den Druck, drucken Sie das PDF und übernehmen Sie die Stunden final in die Buchhaltung.")
+        st.info("Schritt 1 (Erfassung) erfolgt durch die Mitarbeiter. Führen Sie hier Schritt 2 bis 4 durch.")
         
         sel_emp = st.selectbox("Personal-Ordner (Mitarbeiter):", emp_list, key="wa_emp")
         
@@ -289,25 +298,19 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
             df_emp_z = df_z[df_z["Mitarbeiter"] == sel_emp].copy()
             
             if not df_emp_z.empty:
-                # Sortierung nach Status und Datum
                 df_emp_z['Sort'] = df_emp_z['Status'].map({ST_OFFEN: 1, ST_DRUCK: 2, ST_FINAL: 3}).fillna(4)
                 df_emp_z = df_emp_z.sort_values(by=['Sort', 'Datum']).drop(columns=['Sort'])
                 
-                # Interaktiver Daten-Editor (Zeilen löschbar, Werte überschreibbar)
                 edit_z = st.data_editor(df_emp_z, num_rows="dynamic", use_container_width=True, key=f"ed_wa_{sel_emp}")
                 
                 st.divider()
-                st.markdown("**Workflow-Aktionen:**")
                 col_a, col_b, col_c = st.columns(3)
                 
                 with col_a:
-                    if st.button("1. 💾 Änderungen sichern", use_container_width=True):
-                        # Merge updates/deletions back to master
+                    if st.button("💾 Änderungen sichern", use_container_width=True):
                         df_z.set_index('Erfasst', inplace=True)
                         edit_z.set_index('Erfasst', inplace=True)
-                        # Remove deleted rows
                         df_z = df_z[df_z.index.isin(edit_z.index) | (df_z["Mitarbeiter"] != sel_emp)]
-                        # Update changed rows
                         df_z.update(edit_z)
                         df_z.reset_index(inplace=True)
                         ds.save_csv(service, Z_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
@@ -315,8 +318,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                         st.success("Tabelle aktualisiert.")
                         time.sleep(1); st.rerun()
                         
-                    if st.button("2. 🔒 Für Druck freigeben", use_container_width=True):
-                        # Ändert alle "Offen" zu "Druckbereit" für diesen Mitarbeiter
+                    if st.button("🔒 Für Druck freigeben", use_container_width=True):
                         mask = (df_z["Mitarbeiter"] == sel_emp) & (df_z["Status"] == ST_OFFEN)
                         df_z.loc[mask, "Status"] = ST_DRUCK
                         ds.save_csv(service, Z_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
@@ -324,10 +326,8 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                         st.success("Zeiten gesperrt und druckbereit."); time.sleep(1); st.rerun()
 
                 with col_b:
-                    # Generiere Wochenbericht für "Druckbereit"
                     print_mask = (edit_z["Status"] == ST_DRUCK)
                     if not edit_z[print_mask].empty:
-                        # Erzeuge Zeilen für den Ausdruck
                         html_rows = ""
                         total_h = 0
                         for _, r in edit_z[print_mask].iterrows():
@@ -338,7 +338,6 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                         html = f"""<html><body style="font-family:Arial;font-size:12px;background:#fff;color:#000;">
                         <h1 style="margin:0;font-size:22px;border-bottom:2px solid #000;padding-bottom:10px;">Wochenbericht / Arbeitszeit</h1>
                         <p style="font-size:14px;margin-top:10px;"><b>Mitarbeiter:</b> {sel_emp}</p>
-                        
                         <table style="width:100%; border-collapse:collapse; margin-top:20px;">
                             <tr>
                                 <th style="border:1px solid #aaaaaa; padding:10px; width:20%; text-align:left; background-color:#f9f9f9;">Datum</th>
@@ -348,23 +347,21 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                             {html_rows}
                             <tr>
                                 <td colspan="2" style="border:1px solid #aaaaaa; padding:10px; text-align:right;"><b>Gesamtsumme:</b></td>
-                                <td style="border:1px solid #aaaaaa; padding:10px; text-align:center;"><b>{total_h} Std.</b></td>
+                                <td style="border:1px solid #aaaaaa; padding:10px; text-align:center;"><b>{round(total_h, 2)} Std.</b></td>
                             </tr>
                         </table>
-                        
                         <div style="margin-top:54px; display:flex; justify-content:space-between;">
                             <div style="border-top:1px solid #000; width:45%; padding-top:10px;">Visum Administration</div>
                             <div style="border-top:1px solid #000; width:45%; padding-top:10px;">Unterschrift Mitarbeiter</div>
                         </div>
                         </body></html>"""
                         
-                        st.download_button("3. 🖨️ Wochenbericht drucken", html, f"Wochenbericht_{sel_emp.replace(' ','_')}.html", "text/html", use_container_width=True)
+                        st.download_button("🖨️ Wochenbericht drucken", html, f"Wochenbericht_{sel_emp.replace(' ','_')}.html", "text/html", use_container_width=True)
                     else:
-                        st.button("3. 🖨️ (Keine druckbereiten Daten)", disabled=True, use_container_width=True)
+                        st.button("🖨️ (Keine druckbereiten Daten)", disabled=True, use_container_width=True)
 
                 with col_c:
-                    if st.button("4. ✅ Unterschrieben -> In AZK buchen", type="primary", use_container_width=True):
-                        # Verschiebt Druckbereit zu Final
+                    if st.button("✅ In AZK buchen (Final)", type="primary", use_container_width=True):
                         mask = (df_z["Mitarbeiter"] == sel_emp) & (df_z["Status"] == ST_DRUCK)
                         df_z.loc[mask, "Status"] = ST_FINAL
                         ds.save_csv(service, Z_FID, "Arbeitszeit_AKZ.csv", df_z, fid_z)
@@ -374,7 +371,7 @@ def render_admin_portal(service, P_FID, Z_FID, FOTO_FID, PLAN_FID, BASE_URL):
                 st.write("Keine Zeiteinträge für diesen Mitarbeiter gefunden.")
 
     # -----------------------------
-    # 7.2 PROJEKT-CONTROLLING (DATEN-EDITOREN)
+    # 7.2 PROJEKT-CONTROLLING
     # -----------------------------
     with t_ctrl:
         st.markdown("**Projekt-Rapporte (Tätigkeiten & Material)**")
