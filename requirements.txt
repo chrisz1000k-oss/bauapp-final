@@ -1,7 +1,9 @@
 streamlit
 pandas
-google-api-python-client
 google-auth
 google-auth-oauthlib
 google-auth-httplib2
-openpyxl
+google-api-python-client
+streamlit-drawable-canvas
+reportlab
+Pillow
