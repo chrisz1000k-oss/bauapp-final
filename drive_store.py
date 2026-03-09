@@ -7,19 +7,27 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 # --- AUTHENTIFIZIERUNG ---
 def get_drive_service():
-    """Erstellt die Verbindung zu Google Drive basierend auf secrets.toml"""
-    # Prüfen ob Token in secrets existiert
-    if "GOOGLE_REFRESH_TOKEN" not in st.secrets:
-        return None
+    """Erstellt die Verbindung zu Google Drive über Service Account aus secrets.toml"""
+    try:
+        if "gcp_service_account" not in st.secrets:
+            st.error("Service-Account Konfiguration fehlt in secrets.toml.")
+            return None
 
-    creds = Credentials(
-        None,
-        refresh_token=st.secrets["GOOGLE_REFRESH_TOKEN"],
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=st.secrets["GOOGLE_CLIENT_ID"],
-        client_secret=st.secrets["GOOGLE_CLIENT_SECRET"],
-    )
-    return build('drive', 'v3', credentials=creds)
+        sa_info = dict(st.secrets["gcp_service_account"])
+
+        scopes = [
+            "https://www.googleapis.com/auth/drive"
+        ]
+
+        creds = service_account.Credentials.from_service_account_info(
+            sa_info,
+            scopes=scopes
+        )
+
+        return build("drive", "v3", credentials=creds)
+    except Exception as e:
+        st.error(f"Google Drive Verbindung fehlgeschlagen: {e}")
+        return None
 
 # --- DATEI OPERATIONEN ---
 def get_file_id(service, folder_id, filename):
